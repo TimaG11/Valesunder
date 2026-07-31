@@ -1,0 +1,36 @@
+﻿# Unreal generated folders
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Visual Studio generated files
+.vs/
+*.sln
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Rider / JetBrains
+.idea/
+
+# Logs
+*.log
+UpgradeLog*.htm
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Local backups
+Backup*/
+
+# Packaged game builds
+/Test/
+/Test_v1/
+/Test_v2/
+/Builds/
+/PackagedBuilds/

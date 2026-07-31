@@ -1,0 +1,17 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0",
+  "FriendlyName": "Rule Map Generator",
+  "Description": "Biome rule map generator editor tool",
+  "Category": "Project",
+  "Modules": [
+    {
+      "Name": "RuleMapGen",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "CanContainContent": false,
+  "EnabledByDefault": false
+}
