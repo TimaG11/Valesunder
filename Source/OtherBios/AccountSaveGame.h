@@ -27,6 +27,27 @@ struct FAccountUnitProgressRecord
 	int32 CurrentExperience = 0;
 };
 
+
+/**
+ * Persisted snapshot of one faction/role synergy icon.
+ * Values are stored as bytes to keep AccountSaveGame independent from ArmyBuilderWidget enums.
+ * ArmyBuilder validates/rebuilds these records from SavedArmyUnitClasses after load.
+ */
+USTRUCT(BlueprintType)
+struct FAccountFactionEffectRecord
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Faction Effects")
+	uint8 FactionValue = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Faction Effects")
+	uint8 RoleValue = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Faction Effects", meta = (ClampMin = "0", ClampMax = "5"))
+	int32 UnitCount = 0;
+};
+
 /**
  * Disk-backed account data.
  * Character progression is stored by class, while army composition preserves
@@ -38,8 +59,10 @@ class OTHERBIOS_API UAccountSaveGame : public USaveGame
 	GENERATED_BODY()
 
 public:
+	virtual void Serialize(FArchive& Ar) override;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account")
-	int32 SaveVersion = 2;
+	int32 SaveVersion = 3;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Progression")
 	TArray<FAccountUnitProgressRecord> UnitProgress;
@@ -47,6 +70,11 @@ public:
 	// Ordered selected army. Duplicate unit classes are intentionally allowed.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Army")
 	TArray<TSoftClassPtr<AHexUnitActor>> SavedArmyUnitClasses;
+
+	// Snapshot of active faction-role icons. It is persisted as a safety net and
+	// validated/rebuilt from the saved army composition after loading.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Faction Effects")
+	TArray<FAccountFactionEffectRecord> FactionEffects;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Currency")
 	int32 Coins = 0;

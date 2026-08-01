@@ -101,6 +101,29 @@ struct FArmyFactionEffectFactionConfig
 	TArray<FArmyFactionEffectIconConfig> Icons;
 };
 
+
+USTRUCT(BlueprintType)
+struct FArmyFactionEffectBonuses
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Faction Effects")
+	float MaxHealthMultiplier = 1.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Faction Effects")
+	float AttackDamageMultiplier = 1.0f;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Faction Effects")
+	float HealAmountMultiplier = 1.0f;
+
+	// All faction-effect movement bonuses are capped to +1.
+	UPROPERTY(BlueprintReadOnly, Category = "Faction Effects")
+	int32 MovementRangeBonus = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Faction Effects")
+	int32 MatchingRoleCount = 0;
+};
+
 USTRUCT(BlueprintType)
 struct FArmyBuilderUnitProgress
 {
@@ -169,6 +192,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Army Builder")
 	int32 GetCurrentArmyPower() const;
 
+	UFUNCTION(BlueprintPure, Category = "Army Builder|Faction Effects")
+	FArmyFactionEffectBonuses GetSelectedUnitFactionEffectBonusesAt(int32 SelectedIndex) const;
+
+	// Battle code uses this same resolver, so the left-card preview and runtime stats cannot diverge.
+	static FArmyFactionEffectBonuses CalculateFactionEffectBonusesForArmyUnit(
+		const TArray<TSubclassOf<AHexUnitActor>>& ArmyClasses,
+		TSubclassOf<AHexUnitActor> UnitClass
+	);
+
 	UFUNCTION(BlueprintPure, Category = "Army Builder|Progression")
 	FArmyBuilderUnitProgress GetSelectedUnitProgressAt(int32 SelectedIndex) const;
 
@@ -223,6 +255,8 @@ public:
 	static void ImportPersistentUnitProgress(const TArray<FAccountUnitProgressRecord>& Records);
 	static void ExportPersistentArmyAndCoins(TArray<TSoftClassPtr<AHexUnitActor>>& OutArmyClasses, int32& OutCoins);
 	static void ImportPersistentArmyAndCoins(const TArray<TSoftClassPtr<AHexUnitActor>>& ArmyClasses, int32 Coins);
+	static void ExportPersistentFactionEffects(TArray<FAccountFactionEffectRecord>& OutRecords);
+	static void ImportPersistentFactionEffects(const TArray<FAccountFactionEffectRecord>& Records);
 	static void ResetSessionAccountState();
 
 protected:
@@ -315,7 +349,8 @@ protected:
 	TArray<FArmyFactionEffectFactionConfig> FactionEffectConfigs;
 
 	// Shared threshold for every faction and every icon.
-	// An icon is shown only when the selected army contains at least this many matching units.
+	// Champions are ignored. An icon is shown only when the selected army contains
+	// at least this many matching non-champion units of that faction/role.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Army Builder|Faction Effects", meta = (ClampMin = "1"))
 	int32 MinUnitsForFactionEffectIcon = 2;
 
@@ -463,6 +498,10 @@ private:
 	static int32 CachedPreviewArmyPower;
 	static int32 SavedCoins;
 
+	// Persisted safety snapshot of faction-role icon counts.
+	// The army composition remains the source of truth and rebuilds this after load/save.
+	static TArray<FAccountFactionEffectRecord> SavedFactionEffectRecords;
+
 	UPROPERTY()
 	UArmyDeploymentWidget* ActiveDeploymentWidget = nullptr;
 
@@ -482,7 +521,8 @@ private:
 	void UpdateFilterVisuals();
 	void RefreshFactionEffectIcons();
 	int32 CountSelectedUnitsForFactionEffect(EHexUnitFaction Faction, EArmyFactionEffectRole Role) const;
-	bool DoesUnitMatchFactionEffectRole(const AHexUnitActor* Unit, EArmyFactionEffectRole Role) const;
+	static bool DoesUnitMatchFactionEffectRole(const AHexUnitActor* Unit, EArmyFactionEffectRole Role);
+	static void RebuildSavedFactionEffectRecordsFromArmy(const TArray<TSubclassOf<AHexUnitActor>>& ArmyClasses);
 	void RefreshAvailableUnitList();
 	void RefreshSelectedArmyList();
 	void SaveSelectedArmyForBattle();

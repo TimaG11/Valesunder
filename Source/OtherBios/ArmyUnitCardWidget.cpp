@@ -229,12 +229,27 @@ void UArmyUnitCardWidget::RefreshCardVisuals()
 	}
 
 	const int32 PreviewLevel = bUpgradePreviewActive ? DisplayLevel + 1 : DisplayLevel;
-	const int32 CurrentHealth = DefaultUnit->GetScaledMaxHealthForLevel(DisplayLevel);
-	const int32 CurrentAttack = DefaultUnit->GetScaledAttackDamageForLevel(DisplayLevel);
+
+	// Synergy changes are visible only in the LEFT selected-army card.
+	// The available card on the right intentionally shows the unbuffed base values.
+	FArmyFactionEffectBonuses FactionBonuses;
+	if (bRemoveFromArmyOnClick && OwnerArmyBuilder && SelectedArmyIndex != INDEX_NONE)
+	{
+		FactionBonuses = OwnerArmyBuilder->GetSelectedUnitFactionEffectBonusesAt(SelectedArmyIndex);
+	}
+
+	const auto ApplyStatMultiplier = [](int32 BaseValue, float Multiplier)
+		{
+			return FMath::Max(0, FMath::RoundToInt(static_cast<float>(BaseValue) * FMath::Max(0.0f, Multiplier)));
+		};
+
+	const int32 CurrentHealth = ApplyStatMultiplier(DefaultUnit->GetScaledMaxHealthForLevel(DisplayLevel), FactionBonuses.MaxHealthMultiplier);
+	const int32 CurrentAttack = ApplyStatMultiplier(DefaultUnit->GetScaledAttackDamageForLevel(DisplayLevel), FactionBonuses.AttackDamageMultiplier);
 	const int32 CurrentPower = DefaultUnit->GetArmyPowerValueForLevel(DisplayLevel);
-	const int32 PreviewHealth = DefaultUnit->GetScaledMaxHealthForLevel(PreviewLevel);
-	const int32 PreviewAttack = DefaultUnit->GetScaledAttackDamageForLevel(PreviewLevel);
+	const int32 PreviewHealth = ApplyStatMultiplier(DefaultUnit->GetScaledMaxHealthForLevel(PreviewLevel), FactionBonuses.MaxHealthMultiplier);
+	const int32 PreviewAttack = ApplyStatMultiplier(DefaultUnit->GetScaledAttackDamageForLevel(PreviewLevel), FactionBonuses.AttackDamageMultiplier);
 	const int32 PreviewPower = DefaultUnit->GetArmyPowerValueForLevel(PreviewLevel);
+	const int32 DisplayMovementRange = FMath::Max(0, DefaultUnit->MovementRange + FMath::Clamp(FactionBonuses.MovementRangeBonus, 0, 1));
 	const int32 RequiredExperience = AHexUnitActor::GetExperienceToNextLevelForLevel(DisplayLevel);
 
 	if (UnitNameTextBlock)
@@ -266,7 +281,7 @@ void UArmyUnitCardWidget::RefreshCardVisuals()
 	{
 		MovementRangeTextBlock->SetText(FText::Format(
 			NSLOCTEXT("ArmyUnitCard", "MovementRangeFormat", "MOVE {0}"),
-			FText::AsNumber(FMath::Max(0, DefaultUnit->MovementRange))
+			FText::AsNumber(DisplayMovementRange)
 		));
 	}
 

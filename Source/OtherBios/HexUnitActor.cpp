@@ -182,6 +182,11 @@ int32 AHexUnitActor::GetMaxProgressionLevel()
 	return 15;
 }
 
+int32 AHexUnitActor::GetCombatStatScale()
+{
+	return 10;
+}
+
 int32 AHexUnitActor::GetExperienceToNextLevelForLevel(int32 Level)
 {
 	const int32 SafeLevel = FMath::Clamp(Level, 1, GetMaxProgressionLevel());
@@ -221,13 +226,13 @@ int32 AHexUnitActor::GetClampedUnitLevel() const
 int32 AHexUnitActor::GetScaledMaxHealthForLevel(int32 Level) const
 {
 	const int32 BaseHealth = bRuntimeBaseStatsCaptured ? RuntimeBaseMaxHealth : MaxHealth;
-	return GetScaledStatForLevel(BaseHealth, Level);
+	return GetScaledStatForLevel(BaseHealth * GetCombatStatScale(), Level);
 }
 
 int32 AHexUnitActor::GetScaledAttackDamageForLevel(int32 Level) const
 {
 	const int32 BaseAttackDamage = bRuntimeBaseStatsCaptured ? RuntimeBaseAttackDamage : AttackDamage;
-	return GetScaledStatForLevel(BaseAttackDamage, Level);
+	return GetScaledStatForLevel(BaseAttackDamage * GetCombatStatScale(), Level);
 }
 
 void AHexUnitActor::SetProgressionState(int32 NewLevel, int32 NewCurrentExperience)
@@ -249,6 +254,7 @@ void AHexUnitActor::ApplyProgressionStatsToRuntimeUnit()
 	{
 		RuntimeBaseMaxHealth = FMath::Max(1, MaxHealth);
 		RuntimeBaseAttackDamage = FMath::Max(0, AttackDamage);
+		RuntimeBaseHealAmount = FMath::Max(0, HealAmount);
 		bRuntimeBaseStatsCaptured = true;
 	}
 
@@ -257,8 +263,12 @@ void AHexUnitActor::ApplyProgressionStatsToRuntimeUnit()
 	ExperienceToNextLevelAtLevel1 = 200;
 	ExperienceToNextLevelIncreasePerLevel = 100;
 
-	MaxHealth = GetScaledStatForLevel(RuntimeBaseMaxHealth, UnitLevel);
-	AttackDamage = GetScaledStatForLevel(RuntimeBaseAttackDamage, UnitLevel);
+	MaxHealth = GetScaledStatForLevel(RuntimeBaseMaxHealth * GetCombatStatScale(), UnitLevel);
+	AttackDamage = GetScaledStatForLevel(RuntimeBaseAttackDamage * GetCombatStatScale(), UnitLevel);
+	if (bCanHeal)
+	{
+		HealAmount = RuntimeBaseHealAmount * GetCombatStatScale();
+	}
 	CurrentHealth = FMath::Clamp(CurrentHealth, 0, MaxHealth);
 }
 
@@ -297,12 +307,14 @@ int32 AHexUnitActor::GetArmyPowerValueForLevel(int32 Level) const
 
 	const int32 EffectiveHealth = GetScaledMaxHealthForLevel(Level);
 	const int32 EffectiveDamage = GetScaledAttackDamageForLevel(Level);
-	const int32 EffectiveHeal = bCanHeal ? FMath::Max(0, HealAmount) : 0;
+	const int32 BaseHealForPower = bRuntimeBaseStatsCaptured ? RuntimeBaseHealAmount : (bCanHeal ? FMath::Max(0, HealAmount) : 0);
+	const float StatScale = static_cast<float>(FMath::Max(1, GetCombatStatScale()));
 
+	// Keep Army Power on the pre-x10 balance scale.
 	float PowerValue = 0.0f;
-	PowerValue += static_cast<float>(EffectiveHealth) * 0.5f;
-	PowerValue += static_cast<float>(EffectiveDamage) * 4.0f;
-	PowerValue += static_cast<float>(EffectiveHeal) * 3.0f;
+	PowerValue += (static_cast<float>(EffectiveHealth) / StatScale) * 0.5f;
+	PowerValue += (static_cast<float>(EffectiveDamage) / StatScale) * 4.0f;
+	PowerValue += static_cast<float>(BaseHealForPower) * 3.0f;
 	PowerValue += static_cast<float>(FMath::Max(0, MovementRange)) * 6.0f;
 	PowerValue += static_cast<float>(FMath::Max(0, AttackRange)) * 8.0f;
 	PowerValue += static_cast<float>(FMath::Max(0, OccupiedSlots)) * 10.0f;

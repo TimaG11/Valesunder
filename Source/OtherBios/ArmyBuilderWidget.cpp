@@ -30,6 +30,7 @@ TArray<FArmyBuilderUnitProgress> UArmyBuilderWidget::SavedPlayerArmyUnitProgress
 TMap<UClass*, FArmyBuilderUnitProgress> UArmyBuilderWidget::SavedRosterUnitProgress;
 int32 UArmyBuilderWidget::CachedPreviewArmyPower = 0;
 int32 UArmyBuilderWidget::SavedCoins = 0;
+TArray<FAccountFactionEffectRecord> UArmyBuilderWidget::SavedFactionEffectRecords;
 
 int32 UArmyBuilderWidget::GetSavedCoins()
 {
@@ -136,6 +137,38 @@ void UArmyBuilderWidget::ExportPersistentArmyAndCoins(TArray<TSoftClassPtr<AHexU
 	OutCoins = FMath::Max(0, SavedCoins);
 }
 
+void UArmyBuilderWidget::ExportPersistentFactionEffects(TArray<FAccountFactionEffectRecord>& OutRecords)
+{
+	// Always refresh from the saved army before serializing. This prevents stale
+	// icon counts if role/faction rules change in a later build.
+	RebuildSavedFactionEffectRecordsFromArmy(SavedPlayerArmyUnitClasses);
+	OutRecords = SavedFactionEffectRecords;
+}
+
+void UArmyBuilderWidget::ImportPersistentFactionEffects(const TArray<FAccountFactionEffectRecord>& Records)
+{
+	SavedFactionEffectRecords.Reset();
+
+	for (const FAccountFactionEffectRecord& Record : Records)
+	{
+		if (Record.UnitCount < 2 || Record.UnitCount > 5)
+		{
+			continue;
+		}
+
+		if (Record.FactionValue > static_cast<uint8>(EHexUnitFaction::Bandits) ||
+			Record.RoleValue > static_cast<uint8>(EArmyFactionEffectRole::Healer))
+		{
+			continue;
+		}
+
+		SavedFactionEffectRecords.Add(Record);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("Persistent faction effects imported: Records=%d."),
+		SavedFactionEffectRecords.Num());
+}
+
 void UArmyBuilderWidget::ImportPersistentArmyAndCoins(const TArray<TSoftClassPtr<AHexUnitActor>>& ArmyClasses, int32 Coins)
 {
 	SavedPlayerArmyUnitClasses.Reset();
@@ -167,6 +200,11 @@ void UArmyBuilderWidget::ImportPersistentArmyAndCoins(const TArray<TSoftClassPtr
 	}
 	NormalizeProgressListForArmy(SavedPlayerArmyUnitClasses, SavedPlayerArmyUnitProgress);
 
+	// The saved icon snapshot is restored by AccountSaveGame::Serialize, but the
+	// composition is authoritative. Rebuild now so old saves (without records) and
+	// future rule changes still produce correct active synergies immediately.
+	RebuildSavedFactionEffectRecordsFromArmy(SavedPlayerArmyUnitClasses);
+
 	SavedCoins = FMath::Max(0, Coins);
 	CachedPreviewArmyPower = 0;
 	for (int32 Index = 0; Index < SavedPlayerArmyUnitClasses.Num(); ++Index)
@@ -193,6 +231,7 @@ void UArmyBuilderWidget::ResetSessionAccountState()
 	SavedPlayerArmyDeploymentSlots.Reset();
 	SavedPlayerArmyUnitProgress.Reset();
 	SavedRosterUnitProgress.Reset();
+	SavedFactionEffectRecords.Reset();
 	SavedCoins = 0;
 	CachedPreviewArmyPower = 0;
 }
@@ -490,6 +529,93 @@ int32 UArmyBuilderWidget::GetSelectedChampionCount() const
 int32 UArmyBuilderWidget::GetCurrentArmyPower() const
 {
 	return CalculateArmyPowerForList(SelectedArmyUnitClasses);
+}
+
+FArmyFactionEffectBonuses UArmyBuilderWidget::CalculateFactionEffectBonusesForArmyUnit(
+	const TArray<TSubclassOf<AHexUnitActor>>& ArmyClasses,
+	TSubclassOf<AHexUnitActor> UnitClass
+)
+{
+	FArmyFactionEffectBonuses Bonuses;
+
+	const AHexUnitActor* Unit = UnitClass ? UnitClass->GetDefaultObject<AHexUnitActor>() : nullptr;
+	if (!Unit || Unit->UnitType == EHexUnitType::Champion)
+	{
+		return Bonuses;
+	}
+
+	EArmyFactionEffectRole Role = EArmyFactionEffectRole::Melee;
+	if (DoesUnitMatchFactionEffectRole(Unit, EArmyFactionEffectRole::Tank))
+	{
+		Role = EArmyFactionEffectRole::Tank;
+	}
+	else if (DoesUnitMatchFactionEffectRole(Unit, EArmyFactionEffectRole::Healer))
+	{
+		Role = EArmyFactionEffectRole::Healer;
+	}
+	else if (DoesUnitMatchFactionEffectRole(Unit, EArmyFactionEffectRole::Ranged))
+	{
+		Role = EArmyFactionEffectRole::Ranged;
+	}
+
+	int32 MatchingCount = 0;
+	for (const TSubclassOf<AHexUnitActor>& CandidateClass : ArmyClasses)
+	{
+		const AHexUnitActor* Candidate = CandidateClass ? CandidateClass->GetDefaultObject<AHexUnitActor>() : nullptr;
+		if (!Candidate || Candidate->Faction != Unit->Faction)
+		{
+			continue;
+		}
+
+		if (DoesUnitMatchFactionEffectRole(Candidate, Role))
+		{
+			++MatchingCount;
+		}
+	}
+
+	Bonuses.MatchingRoleCount = MatchingCount;
+	if (MatchingCount < 2)
+	{
+		return Bonuses;
+	}
+
+	const int32 Tier = FMath::Clamp(MatchingCount, 2, 5);
+	switch (Role)
+	{
+	case EArmyFactionEffectRole::Tank:
+		// 2/3/4/5 Tanks: +3/+5/+7/+10% HP.
+		Bonuses.MaxHealthMultiplier = 1.0f + (Tier == 2 ? 0.03f : Tier == 3 ? 0.05f : Tier == 4 ? 0.07f : 0.10f);
+		break;
+
+	case EArmyFactionEffectRole::Ranged:
+		// 2/3/4/5 Ranged: +2/+4/+6/+8% ATK.
+		Bonuses.AttackDamageMultiplier = 1.0f + (Tier == 2 ? 0.02f : Tier == 3 ? 0.04f : Tier == 4 ? 0.06f : 0.08f);
+		break;
+
+	case EArmyFactionEffectRole::Healer:
+		// 2/3/4/5 Healers: +4/+7/+10/+15% healing.
+		Bonuses.HealAmountMultiplier = 1.0f + (Tier == 2 ? 0.04f : Tier == 3 ? 0.07f : Tier == 4 ? 0.10f : 0.15f);
+		break;
+
+	case EArmyFactionEffectRole::Melee:
+	default:
+		// 2/3/4/5 Melee: +3/+5/+7/+10% ATK.
+		Bonuses.AttackDamageMultiplier = 1.0f + (Tier == 2 ? 0.03f : Tier == 3 ? 0.05f : Tier == 4 ? 0.07f : 0.10f);
+		break;
+	}
+
+	Bonuses.MovementRangeBonus = MatchingCount >= 5 ? 1 : 0;
+	return Bonuses;
+}
+
+FArmyFactionEffectBonuses UArmyBuilderWidget::GetSelectedUnitFactionEffectBonusesAt(int32 SelectedIndex) const
+{
+	if (!SelectedArmyUnitClasses.IsValidIndex(SelectedIndex))
+	{
+		return FArmyFactionEffectBonuses();
+	}
+
+	return CalculateFactionEffectBonusesForArmyUnit(SelectedArmyUnitClasses, SelectedArmyUnitClasses[SelectedIndex]);
 }
 
 FArmyBuilderUnitProgress UArmyBuilderWidget::GetSelectedUnitProgressAt(int32 SelectedIndex) const
@@ -900,6 +1026,7 @@ void UArmyBuilderWidget::ClearSavedPlayerArmy()
 	SavedPlayerArmyUnitClasses.Reset();
 	SavedPlayerArmyDeploymentSlots.Reset();
 	SavedPlayerArmyUnitProgress.Reset();
+	SavedFactionEffectRecords.Reset();
 	CachedPreviewArmyPower = 0;
 }
 
@@ -1135,31 +1262,82 @@ void UArmyBuilderWidget::UpdateAllVisuals()
 }
 
 
-bool UArmyBuilderWidget::DoesUnitMatchFactionEffectRole(const AHexUnitActor* Unit, EArmyFactionEffectRole Role) const
+bool UArmyBuilderWidget::DoesUnitMatchFactionEffectRole(const AHexUnitActor* Unit, EArmyFactionEffectRole Role)
 {
 	if (!Unit)
 	{
 		return false;
 	}
 
+	// Champions never contribute to faction-effect role icons.
+	if (Unit->UnitType == EHexUnitType::Champion)
+	{
+		return false;
+	}
+
+	// Every non-champion belongs to exactly one faction-effect role.
+	// This prevents Ram/Healer units from also being counted as Melee/Ranged.
 	switch (Role)
 	{
-	case EArmyFactionEffectRole::Ranged:
-		return Unit->AttackRange > 1;
-
 	case EArmyFactionEffectRole::Tank:
 		return Unit->UnitType == EHexUnitType::Ram;
 
 	case EArmyFactionEffectRole::Healer:
-		return Unit->UnitType == EHexUnitType::Healer && Unit->bCanHeal && Unit->HealAmount > 0;
+		return Unit->UnitType == EHexUnitType::Healer;
+
+	case EArmyFactionEffectRole::Ranged:
+		return Unit->UnitType != EHexUnitType::Ram
+			&& Unit->UnitType != EHexUnitType::Healer
+			&& Unit->AttackRange > 1;
 
 	case EArmyFactionEffectRole::Melee:
 	default:
-		// Melee includes non-healing units that fight at range 1.
-		// This allows melee champions to contribute without also counting healers.
-		return Unit->AttackRange <= 1
-			&& !(Unit->UnitType == EHexUnitType::Healer && Unit->bCanHeal && Unit->HealAmount > 0);
+		return Unit->UnitType != EHexUnitType::Ram
+			&& Unit->UnitType != EHexUnitType::Healer
+			&& Unit->AttackRange <= 1;
 	}
+}
+
+void UArmyBuilderWidget::RebuildSavedFactionEffectRecordsFromArmy(const TArray<TSubclassOf<AHexUnitActor>>& ArmyClasses)
+{
+	SavedFactionEffectRecords.Reset();
+
+	for (uint8 FactionValue = 0; FactionValue <= static_cast<uint8>(EHexUnitFaction::Bandits); ++FactionValue)
+	{
+		const EHexUnitFaction Faction = static_cast<EHexUnitFaction>(FactionValue);
+
+		for (uint8 RoleValue = 0; RoleValue <= static_cast<uint8>(EArmyFactionEffectRole::Healer); ++RoleValue)
+		{
+			const EArmyFactionEffectRole Role = static_cast<EArmyFactionEffectRole>(RoleValue);
+			int32 Count = 0;
+
+			for (const TSubclassOf<AHexUnitActor>& UnitClass : ArmyClasses)
+			{
+				const AHexUnitActor* Unit = UnitClass ? UnitClass->GetDefaultObject<AHexUnitActor>() : nullptr;
+				if (!Unit || Unit->Faction != Faction || Unit->UnitType == EHexUnitType::Champion)
+				{
+					continue;
+				}
+
+				if (DoesUnitMatchFactionEffectRole(Unit, Role))
+				{
+					++Count;
+				}
+			}
+
+			if (Count >= 2)
+			{
+				FAccountFactionEffectRecord& Record = SavedFactionEffectRecords.AddDefaulted_GetRef();
+				Record.FactionValue = FactionValue;
+				Record.RoleValue = RoleValue;
+				Record.UnitCount = FMath::Clamp(Count, 2, 5);
+			}
+		}
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("Faction effect snapshot rebuilt from army: ArmyUnits=%d Effects=%d."),
+		ArmyClasses.Num(),
+		SavedFactionEffectRecords.Num());
 }
 
 int32 UArmyBuilderWidget::CountSelectedUnitsForFactionEffect(EHexUnitFaction Faction, EArmyFactionEffectRole Role) const
@@ -1499,6 +1677,7 @@ void UArmyBuilderWidget::SaveSelectedArmyForBattle()
 	StoreProgressListInRoster(SavedPlayerArmyUnitClasses, SavedPlayerArmyUnitProgress);
 
 	CachedPreviewArmyPower = CalculateArmyPowerForList(SavedPlayerArmyUnitClasses);
+	RebuildSavedFactionEffectRecordsFromArmy(SavedPlayerArmyUnitClasses);
 
 	if (SavedPlayerArmyDeploymentSlots.Num() > 0 && !IsDeploymentSlotListValidForArmy(SavedPlayerArmyDeploymentSlots, SavedPlayerArmyUnitClasses.Num()))
 	{

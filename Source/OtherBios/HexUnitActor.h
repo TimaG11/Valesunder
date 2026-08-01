@@ -613,6 +613,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Hex Unit|Progression")
 	static int32 GetMaxProgressionLevel();
 
+	// Runtime combat stats use 10x integer precision.
+	static int32 GetCombatStatScale();
+
 	UFUNCTION(BlueprintPure, Category = "Hex Unit|Progression")
 	static int32 GetExperienceToNextLevelForLevel(int32 Level);
 
@@ -807,6 +810,7 @@ private:
 
 	int32 RuntimeBaseMaxHealth = 0;
 	int32 RuntimeBaseAttackDamage = 0;
+	int32 RuntimeBaseHealAmount = 0;
 	bool bRuntimeBaseStatsCaptured = false;
 
 	bool bInitialTeamRotationApplied = false;

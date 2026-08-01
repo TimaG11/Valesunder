@@ -495,7 +495,7 @@ float AHexGridActor::ScoreEnemyBotPlanTarget(AHexUnitActor* Target) const
 
 	float Score = GetEnemyBotTargetBaseValue(Target) * (0.70f + 0.25f * static_cast<float>(GetEnemyBotPlanningDepth()));
 	Score += (1.0f - HealthPercent) * 480.0f;
-	Score += static_cast<float>(Target->AttackDamage) * 3.0f;
+	Score += (static_cast<float>(Target->AttackDamage) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale()))) * 3.0f;
 	Score += static_cast<float>(Target->AttackRange) * 28.0f;
 
 	if ((Target->UnitType == EHexUnitType::Support || Target->UnitType == EHexUnitType::Healer) && Target->CanHeal())
@@ -568,8 +568,8 @@ float AHexGridActor::GetEnemyBotUnitBoardValue(AHexUnitActor* Unit) const
 	}
 
 	float Value = 120.0f;
-	Value += static_cast<float>(FMath::Max(1, Unit->MaxHealth)) * 1.15f;
-	Value += static_cast<float>(FMath::Max(0, Unit->AttackDamage)) * 5.5f;
+	Value += (static_cast<float>(FMath::Max(1, Unit->MaxHealth)) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale()))) * 1.15f;
+	Value += (static_cast<float>(FMath::Max(0, Unit->AttackDamage)) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale()))) * 5.5f;
 	Value += static_cast<float>(FMath::Max(1, Unit->AttackRange)) * 45.0f;
 	Value += static_cast<float>(FMath::Max(0, Unit->MovementRange)) * 32.0f;
 
@@ -1032,7 +1032,7 @@ bool AHexGridActor::IsEnemyBotCellBlockingImportantAlly(AHexUnitActor* EnemyUnit
 			continue;
 		}
 
-		const bool bImportantMelee = Ally->AttackDamage > EnemyUnit->AttackDamage + 5 || Ally->UnitType == EHexUnitType::Champion || Ally->UnitType == EHexUnitType::Ram;
+		const bool bImportantMelee = Ally->AttackDamage > EnemyUnit->AttackDamage + 5 * AHexUnitActor::GetCombatStatScale() || Ally->UnitType == EHexUnitType::Champion || Ally->UnitType == EHexUnitType::Ram;
 		if (!bImportantMelee || Ally->AttackRange > 1)
 		{
 			continue;
@@ -1087,7 +1087,7 @@ float AHexGridActor::ScoreEnemyBotUnitTurnPriority(AHexUnitActor* EnemyUnit) con
 		}
 		Score += ScoreEnemyBotTargetPressure(EnemyUnit, AttackTarget) * 0.45f;
 		Score += ScoreEnemyBotTrade(EnemyUnit, AttackTarget, bCanKill) * 0.55f;
-		Score += static_cast<float>(EnemyUnit->AttackDamage) * 45.0f;
+		Score += (static_cast<float>(EnemyUnit->AttackDamage) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale()))) * 45.0f;
 		Score += GetEnemyBotTargetBaseValue(AttackTarget) * 0.20f;
 		if (AttackTarget->MaxHealth > 0)
 		{
@@ -1176,7 +1176,7 @@ float AHexGridActor::ScoreEnemyBotUnitTurnPriority(AHexUnitActor* EnemyUnit) con
 	}
 
 	// Stable tie-break: stronger units act earlier when the tactical value is similar.
-	Score += static_cast<float>(EnemyUnit->AttackDamage) * 8.0f;
+	Score += (static_cast<float>(EnemyUnit->AttackDamage) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale()))) * 8.0f;
 	Score += static_cast<float>(EnemyUnit->MovementRange) * 12.0f;
 
 	return Score;
@@ -1485,7 +1485,7 @@ AHexUnitActor* AHexGridActor::FindBestEnemyBotMarkedForDeathTarget(AHexUnitActor
 			: 1.0f;
 
 		float Score = GetEnemyBotTargetBaseValue(Target);
-		Score += static_cast<float>(FMath::Max(0, Target->AttackDamage)) * 4.0f;
+		Score += (static_cast<float>(FMath::Max(0, Target->AttackDamage)) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale()))) * 4.0f;
 		Score += (1.0f - HealthPercent) * 280.0f;
 		Score += ScoreEnemyBotTargetPressure(Champion, Target) * 0.35f;
 
@@ -1530,7 +1530,7 @@ float AHexGridActor::ScoreEnemyBotSummonCell(AHexUnitActor* Summoner, const FInt
 
 	const int32 SummonMoveRange = FMath::Max(0, SummonedDefault->MovementRange);
 	const int32 SummonAttackRange = FMath::Max(1, SummonedDefault->AttackRange);
-	const int32 SummonDamage = FMath::Max(0, SummonedDefault->AttackDamage);
+	const int32 SummonDamage = FMath::Max(0, SummonedDefault->GetScaledAttackDamageForLevel(1));
 	const int32 LifetimeTurns = FMath::Max(1, SummonedDefault->SummonedUnitLifetimeTurns);
 	const int32 SummonCost = CalculateChampionAbilityActionPointCost(Summoner);
 	const int32 AttackCost = CalculateAttackActionPointCost();
@@ -3446,6 +3446,21 @@ bool AHexGridActor::TrySpawnArmyBuilderArmies()
 				? PlayerProgressList[Index]
 				: UArmyBuilderWidget::MakeDefaultUnitProgress(PlayerArmyClasses[Index]);
 			ApplySavedProgressToSpawnedUnit(SpawnedUnit, Progress.Level, Progress.CurrentExperience);
+
+			const FArmyFactionEffectBonuses FactionBonuses = UArmyBuilderWidget::CalculateFactionEffectBonusesForArmyUnit(
+				PlayerArmyClasses,
+				PlayerArmyClasses[Index]
+			);
+			SpawnedUnit->MaxHealth = FMath::Max(1, FMath::RoundToInt(static_cast<float>(SpawnedUnit->MaxHealth) * FactionBonuses.MaxHealthMultiplier));
+			SpawnedUnit->AttackDamage = FMath::Max(0, FMath::RoundToInt(static_cast<float>(SpawnedUnit->AttackDamage) * FactionBonuses.AttackDamageMultiplier));
+			if (SpawnedUnit->bCanHeal)
+			{
+				SpawnedUnit->HealAmount = FMath::Max(0, FMath::RoundToInt(static_cast<float>(SpawnedUnit->HealAmount) * FactionBonuses.HealAmountMultiplier));
+			}
+			SpawnedUnit->MovementRange += FMath::Clamp(FactionBonuses.MovementRangeBonus, 0, 1);
+			SpawnedUnit->CurrentHealth = SpawnedUnit->MaxHealth;
+			SpawnedUnit->UpdateHealthBarWidget();
+
 			RegisterPlayerArmyUnitForProgression(SpawnedUnit, Index);
 			++SpawnedPlayers;
 		}
@@ -7762,7 +7777,7 @@ float AHexGridActor::ScoreEnemyBotAttackTarget(AHexUnitActor* EnemyUnit, AHexUni
 	Score += ScoreEnemyBotTrade(EnemyUnit, Target, bCanKill);
 
 	Score += (1.0f - TargetHealthPercent) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 130.0f : 260.0f);
-	Score += static_cast<float>(Target->AttackDamage) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 1.4f : 3.0f);
+	Score += (static_cast<float>(Target->AttackDamage) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale()))) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 1.4f : 3.0f);
 	Score += static_cast<float>(Target->AttackRange) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 10.0f : 25.0f);
 	Score += static_cast<float>(Target->MovementRange) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 3.0f : 8.0f);
 
@@ -7786,7 +7801,7 @@ float AHexGridActor::ScoreEnemyBotAttackTarget(AHexUnitActor* EnemyUnit, AHexUni
 	}
 
 	// When several bot units can hit the same target, prefer spending AP with the higher-damage attacker.
-	Score += static_cast<float>(EnemyUnit->AttackDamage) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 2.0f : 7.0f);
+	Score += (static_cast<float>(EnemyUnit->AttackDamage) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale()))) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 2.0f : 7.0f);
 
 	if (Target->UnitType == EHexUnitType::Ram && Target->CurrentHealth > Target->GetModifiedIncomingDamage(EnemyUnit->AttackDamage))
 	{
@@ -7916,7 +7931,7 @@ float AHexGridActor::ScoreEnemyBotHealTargetFromCell(AHexUnitActor* Healer, AHex
 	}
 
 	// Do not waste AP on tiny overheal unless there is nothing better.
-	if (EffectiveHeal < FMath::Max(8, Healer->HealAmount / 3) && !bDoomedWithoutHeal)
+	if (EffectiveHeal < FMath::Max(8 * AHexUnitActor::GetCombatStatScale(), Healer->HealAmount / 3) && !bDoomedWithoutHeal)
 	{
 		Score -= 260.0f;
 	}
@@ -8255,7 +8270,7 @@ float AHexGridActor::ScoreEnemyBotMoveCell(AHexUnitActor* EnemyUnit, const FIntP
 			TargetScore += ScoreEnemyBotTrade(EnemyUnit, PlayerUnit, bCandidateCanKillTarget) * 0.65f;
 		}
 		TargetScore += (1.0f - TargetHealthPercent) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 120.0f : 240.0f);
-		TargetScore += static_cast<float>(PlayerUnit->AttackDamage) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 1.2f : 2.5f);
+		TargetScore += (static_cast<float>(PlayerUnit->AttackDamage) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale()))) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 1.2f : 2.5f);
 		TargetScore += static_cast<float>(PlayerUnit->AttackRange) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 9.0f : 22.0f);
 		TargetScore += static_cast<float>(PlayerUnit->MovementRange) * (EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 3.0f : 7.0f);
 
@@ -11259,8 +11274,12 @@ void AHexGridActor::ApplyAttackDamageAndRewards(AHexUnitActor* Attacker, AHexUni
 
 	if (PredictedActualDamage > 0)
 	{
-		AwardBattleExperience(Attacker, Attacker->CanHeal() ? 1 : PredictedActualDamage, Attacker->CanHeal() ? TEXT("HealerAttack") : TEXT("DamageDealt"));
-		AwardBattleExperience(Target, PredictedActualDamage, TEXT("DamageTaken"));
+		const int32 NormalizedDamageExperience = FMath::Max(
+			1,
+			FMath::RoundToInt(static_cast<float>(PredictedActualDamage) / static_cast<float>(FMath::Max(1, AHexUnitActor::GetCombatStatScale())))
+		);
+		AwardBattleExperience(Attacker, Attacker->CanHeal() ? 1 : NormalizedDamageExperience, Attacker->CanHeal() ? TEXT("HealerAttack") : TEXT("DamageDealt"));
+		AwardBattleExperience(Target, NormalizedDamageExperience, TEXT("DamageTaken"));
 	}
 
 	if (bWillKillTarget)
