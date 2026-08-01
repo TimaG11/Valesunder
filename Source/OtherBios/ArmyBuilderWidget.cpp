@@ -1412,7 +1412,109 @@ void UArmyBuilderWidget::RefreshFactionEffectIcons()
 
 			IconRootSizeBox->SetWidthOverride(SafeIconSize);
 			IconRootSizeBox->SetHeightOverride(SafeIconSize);
-			IconRootSizeBox->SetToolTipText(IconConfig.ToolTipText);
+
+			// Build the tooltip from the exact same runtime bonus calculation used by
+			// selected-army cards and battle spawning. This prevents tooltip numbers
+			// from drifting away from the real gameplay effect when balance changes.
+			TSubclassOf<AHexUnitActor> RepresentativeUnitClass = nullptr;
+			for (const TSubclassOf<AHexUnitActor>& SelectedClass : SelectedArmyUnitClasses)
+			{
+				const AHexUnitActor* SelectedUnit = SelectedClass
+					? SelectedClass->GetDefaultObject<AHexUnitActor>()
+					: nullptr;
+
+				if (SelectedUnit
+					&& SelectedUnit->Faction == FactionConfig.Faction
+					&& DoesUnitMatchFactionEffectRole(SelectedUnit, IconConfig.Role))
+				{
+					RepresentativeUnitClass = SelectedClass;
+					break;
+				}
+			}
+
+			const FArmyFactionEffectBonuses ExactBonuses = CalculateFactionEffectBonusesForArmyUnit(
+				SelectedArmyUnitClasses,
+				RepresentativeUnitClass
+			);
+
+			const auto GetFactionName = [](EHexUnitFaction Faction) -> FString
+			{
+				switch (Faction)
+				{
+				case EHexUnitFaction::Kingdom: return TEXT("Kingdom");
+				case EHexUnitFaction::Soul: return TEXT("Souls");
+				case EHexUnitFaction::Animal: return TEXT("Animals");
+				case EHexUnitFaction::Bandits: return TEXT("Bandits");
+				default: return TEXT("Faction");
+				}
+			};
+
+			FString RoleName;
+			FString RequirementDescription;
+			FString BonusDescription;
+
+			switch (IconConfig.Role)
+			{
+			case EArmyFactionEffectRole::Tank:
+				RoleName = TEXT("Tank");
+				RequirementDescription = TEXT("Ram units");
+				BonusDescription = FString::Printf(
+					TEXT("+%d%% Max HP"),
+					FMath::RoundToInt((ExactBonuses.MaxHealthMultiplier - 1.0f) * 100.0f)
+				);
+				break;
+
+			case EArmyFactionEffectRole::Ranged:
+				RoleName = TEXT("Ranged");
+				RequirementDescription = TEXT("ranged non-Champion units");
+				BonusDescription = FString::Printf(
+					TEXT("+%d%% Attack"),
+					FMath::RoundToInt((ExactBonuses.AttackDamageMultiplier - 1.0f) * 100.0f)
+				);
+				break;
+
+			case EArmyFactionEffectRole::Healer:
+				RoleName = TEXT("Healer");
+				RequirementDescription = TEXT("Healer units");
+				BonusDescription = FString::Printf(
+					TEXT("+%d%% Healing"),
+					FMath::RoundToInt((ExactBonuses.HealAmountMultiplier - 1.0f) * 100.0f)
+				);
+				break;
+
+			case EArmyFactionEffectRole::Melee:
+			default:
+				RoleName = TEXT("Melee");
+				RequirementDescription = TEXT("melee non-Champion units");
+				BonusDescription = FString::Printf(
+					TEXT("+%d%% Attack"),
+					FMath::RoundToInt((ExactBonuses.AttackDamageMultiplier - 1.0f) * 100.0f)
+				);
+				break;
+			}
+
+			if (ExactBonuses.MovementRangeBonus > 0)
+			{
+				BonusDescription += TEXT(", +1 MOVE");
+			}
+
+			FString TooltipString = FString::Printf(
+				TEXT("%s %s Synergy\nBonus: %s\nActive because your army has %d %s of this faction.\nRequires at least %d. Champions do not count."),
+				*GetFactionName(FactionConfig.Faction),
+				*RoleName,
+				*BonusDescription,
+				MatchingUnitCount,
+				*RequirementDescription,
+				RequiredCount
+			);
+
+			if (!IconConfig.ToolTipText.IsEmpty())
+			{
+				TooltipString += TEXT("\n");
+				TooltipString += IconConfig.ToolTipText.ToString();
+			}
+
+			IconRootSizeBox->SetToolTipText(FText::FromString(TooltipString));
 			IconRootSizeBox->SetContent(IconOverlay);
 
 			IconImage->SetBrushFromTexture(IconConfig.IconTexture, true);
