@@ -257,6 +257,8 @@ public:
 	static void ImportPersistentArmyAndCoins(const TArray<TSoftClassPtr<AHexUnitActor>>& ArmyClasses, int32 Coins);
 	static void ExportPersistentFactionEffects(TArray<FAccountFactionEffectRecord>& OutRecords);
 	static void ImportPersistentFactionEffects(const TArray<FAccountFactionEffectRecord>& Records);
+	static void ExportPersistentDeployment(TArray<FAccountDeploymentSlotRecord>& OutRecords);
+	static void ImportPersistentDeployment(const TArray<FAccountDeploymentSlotRecord>& Records);
 	static void ResetSessionAccountState();
 
 protected:
@@ -501,6 +503,7 @@ private:
 	// Persisted safety snapshot of faction-role icon counts.
 	// The army composition remains the source of truth and rebuilds this after load/save.
 	static TArray<FAccountFactionEffectRecord> SavedFactionEffectRecords;
+	static TArray<FAccountDeploymentSlotRecord> PendingPersistentDeploymentRecords;
 
 	UPROPERTY()
 	UArmyDeploymentWidget* ActiveDeploymentWidget = nullptr;

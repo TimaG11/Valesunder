@@ -10,7 +10,8 @@ void UAccountSaveGame::Serialize(FArchive& Ar)
 	if (Ar.IsSaving())
 	{
 		UArmyBuilderWidget::ExportPersistentFactionEffects(FactionEffects);
-		SaveVersion = FMath::Max(SaveVersion, 3);
+		UArmyBuilderWidget::ExportPersistentDeployment(SavedDeploymentSlots);
+		SaveVersion = FMath::Max(SaveVersion, 4);
 	}
 
 	Super::Serialize(Ar);
@@ -20,5 +21,6 @@ void UAccountSaveGame::Serialize(FArchive& Ar)
 	if (Ar.IsLoading())
 	{
 		UArmyBuilderWidget::ImportPersistentFactionEffects(FactionEffects);
+		UArmyBuilderWidget::ImportPersistentDeployment(SavedDeploymentSlots);
 	}
 }

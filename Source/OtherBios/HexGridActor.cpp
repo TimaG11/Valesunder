@@ -38,6 +38,25 @@
 #include "TimerManager.h"
 #include "Styling/CoreStyle.h"
 
+namespace
+{
+	constexpr int32 PhotoDeploymentCoordBase = 100000;
+	constexpr int32 PhotoDeploymentCoordScale = 10000;
+
+	bool DecodePhotoDeploymentCoord(int32 EncodedQ, int32 EncodedR, FVector2D& OutNormalized)
+	{
+		if (EncodedQ < PhotoDeploymentCoordBase || EncodedQ > PhotoDeploymentCoordBase + PhotoDeploymentCoordScale ||
+			EncodedR < PhotoDeploymentCoordBase || EncodedR > PhotoDeploymentCoordBase + PhotoDeploymentCoordScale)
+		{
+			return false;
+		}
+
+		OutNormalized.X = static_cast<float>(EncodedQ - PhotoDeploymentCoordBase) / static_cast<float>(PhotoDeploymentCoordScale);
+		OutNormalized.Y = static_cast<float>(EncodedR - PhotoDeploymentCoordBase) / static_cast<float>(PhotoDeploymentCoordScale);
+		return true;
+	}
+}
+
 AHexGridActor::AHexGridActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -3170,9 +3189,26 @@ bool AHexGridActor::TrySpawnArmyBuilderArmies()
 
 	TArray<FHexCoord> PlayerSpawnCoords = PlayerArmyDeploymentCoords;
 
-	const TArray<FArmyBuilderDeploymentSlot> SavedDeploymentSlots = bHasGameInstanceSnapshot
+	// During OpenLevel the GameInstance snapshot is the authoritative state for THIS battle.
+	// Never prefer the static ArmyBuilder cache when a snapshot exists: the static cache can
+	// still contain a previous same-sized deployment and was the reason different menu
+	// formations could enter battle at the same old coordinates.
+	TArray<FArmyBuilderDeploymentSlot> SavedDeploymentSlots = bHasGameInstanceSnapshot
 		? LoadingGameInstance->GetBattleDeploymentSlots()
 		: UArmyBuilderWidget::GetSavedPlayerArmyDeploymentSlots();
+
+	UE_LOG(LogTemp, Warning, TEXT("Battle deployment source=%s Slots=%d PlayerUnits=%d"),
+		bHasGameInstanceSnapshot ? TEXT("GameInstanceSnapshot") : TEXT("ArmyBuilderStatic"),
+		SavedDeploymentSlots.Num(),
+		PlayerArmyClasses.Num());
+
+	for (const FArmyBuilderDeploymentSlot& Slot : SavedDeploymentSlots)
+	{
+		FVector2D PhotoPosition;
+		const bool bPhotoSlot = DecodePhotoDeploymentCoord(Slot.Q, Slot.R, PhotoPosition);
+		UE_LOG(LogTemp, Warning, TEXT("Battle deployment slot: UnitIndex=%d Stored=(%d,%d) Source=%s"),
+			Slot.UnitIndex, Slot.Q, Slot.R, bPhotoSlot ? TEXT("PhotoGrid") : TEXT("LegacyAxial"));
+	}
 	if (SavedDeploymentSlots.Num() == PlayerArmyClasses.Num())
 	{
 		TArray<FHexCoord> CustomPlayerSpawnCoords;
@@ -3182,31 +3218,91 @@ bool AHexGridActor::TrySpawnArmyBuilderArmies()
 		TSet<FIntPoint> UsedCoords;
 		bool bCustomDeploymentValid = true;
 
+		// The menu photo stores NORMALIZED photo positions in encoded Q/R values.
+		// Resolve each position against the cells that actually exist on THIS battle map.
+		// This removes the old dependency on the legacy preview-grid Q/R coordinates.
+		float MinLocalX = TNumericLimits<float>::Max();
+		float MaxLocalX = -TNumericLimits<float>::Max();
+		float MinLocalY = TNumericLimits<float>::Max();
+		float MaxLocalY = -TNumericLimits<float>::Max();
+		for (const FHexCell& Cell : Cells)
+		{
+			const FVector Local = AxialToLocal(Cell.Q, Cell.R);
+			MinLocalX = FMath::Min(MinLocalX, Local.X);
+			MaxLocalX = FMath::Max(MaxLocalX, Local.X);
+			MinLocalY = FMath::Min(MinLocalY, Local.Y);
+			MaxLocalY = FMath::Max(MaxLocalY, Local.Y);
+		}
+
+		const float LocalWidth = FMath::Max(1.0f, MaxLocalX - MinLocalX);
+		const float LocalHeight = FMath::Max(1.0f, MaxLocalY - MinLocalY);
+
 		for (const FArmyBuilderDeploymentSlot& Slot : SavedDeploymentSlots)
 		{
-			const FIntPoint CoordKey(Slot.Q, Slot.R);
-			if (Slot.UnitIndex < 0 || Slot.UnitIndex >= PlayerArmyClasses.Num() ||
-				UsedUnitIndexes.Contains(Slot.UnitIndex) ||
-				UsedCoords.Contains(CoordKey) ||
-				!HasCell(Slot.Q, Slot.R))
+			if (Slot.UnitIndex < 0 || Slot.UnitIndex >= PlayerArmyClasses.Num() || UsedUnitIndexes.Contains(Slot.UnitIndex))
 			{
 				bCustomDeploymentValid = false;
 				break;
 			}
 
-			CustomPlayerSpawnCoords[Slot.UnitIndex] = FHexCoord(Slot.Q, Slot.R);
+			FIntPoint ResolvedCoord(Slot.Q, Slot.R);
+			FVector2D PhotoNormalized;
+			if (DecodePhotoDeploymentCoord(Slot.Q, Slot.R, PhotoNormalized))
+			{
+				float BestScore = TNumericLimits<float>::Max();
+				bool bFoundCell = false;
+				for (const FHexCell& Cell : Cells)
+				{
+					const FIntPoint Candidate(Cell.Q, Cell.R);
+					if (UsedCoords.Contains(Candidate))
+					{
+						continue;
+					}
+
+					const FVector Local = AxialToLocal(Cell.Q, Cell.R);
+					const float NX = FMath::Clamp((Local.X - MinLocalX) / LocalWidth, 0.0f, 1.0f);
+					// Photo Y grows downward. On the battle maps larger Local.Y is the side closer to the camera,
+					// so bottom of the deployment photo must resolve to larger Local.Y.
+					const float NY = FMath::Clamp((Local.Y - MinLocalY) / LocalHeight, 0.0f, 1.0f);
+					const float DX = NX - PhotoNormalized.X;
+					const float DY = NY - PhotoNormalized.Y;
+					const float Score = DX * DX + DY * DY;
+					if (!bFoundCell || Score < BestScore)
+					{
+						BestScore = Score;
+						ResolvedCoord = Candidate;
+						bFoundCell = true;
+					}
+				}
+
+				if (!bFoundCell)
+				{
+					bCustomDeploymentValid = false;
+					break;
+				}
+			}
+			else if (!HasCell(ResolvedCoord.X, ResolvedCoord.Y) || UsedCoords.Contains(ResolvedCoord))
+			{
+				bCustomDeploymentValid = false;
+				break;
+			}
+
+			CustomPlayerSpawnCoords[Slot.UnitIndex] = FHexCoord(ResolvedCoord.X, ResolvedCoord.Y);
 			UsedUnitIndexes.Add(Slot.UnitIndex);
-			UsedCoords.Add(CoordKey);
+			UsedCoords.Add(ResolvedCoord);
+
+			UE_LOG(LogTemp, Warning, TEXT("Photo deployment resolved: UnitIndex=%d Encoded=(%d,%d) -> Grid=(%d,%d)"),
+				Slot.UnitIndex, Slot.Q, Slot.R, ResolvedCoord.X, ResolvedCoord.Y);
 		}
 
 		if (bCustomDeploymentValid && UsedUnitIndexes.Num() == PlayerArmyClasses.Num())
 		{
 			PlayerSpawnCoords = CustomPlayerSpawnCoords;
-			UE_LOG(LogTemp, Log, TEXT("Army Builder: using saved custom player deployment."));
+			UE_LOG(LogTemp, Log, TEXT("Army Builder: using photo-driven player deployment."));
 		}
 		else
 		{
-			UE_LOG(LogTemp, Warning, TEXT("Army Builder: saved custom deployment is invalid for this map. Using default PlayerArmyDeploymentCoords."));
+			UE_LOG(LogTemp, Warning, TEXT("Army Builder: photo deployment could not be resolved on this map. Using default PlayerArmyDeploymentCoords."));
 		}
 	}
 

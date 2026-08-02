@@ -727,6 +727,15 @@ void UArmyUnitCardWidget::GetCardProgressionState(int32& OutLevel, int32& OutCur
 		return;
 	}
 
+	// Deployment cards use the exact progression of the selected army slot.
+	if (bSelectForDeploymentOnClick && OwnerDeploymentWidget && DeploymentUnitIndex != INDEX_NONE)
+	{
+		const FArmyBuilderUnitProgress Progress = OwnerDeploymentWidget->GetDeploymentUnitProgressAt(DeploymentUnitIndex);
+		OutLevel = FMath::Clamp(Progress.Level, 1, AHexUnitActor::GetMaxProgressionLevel());
+		OutCurrentExperience = FMath::Max(0, Progress.CurrentExperience);
+		return;
+	}
+
 	if (OwnerArmyBuilder && UnitClass)
 	{
 		const FArmyBuilderUnitProgress Progress = OwnerArmyBuilder->GetKnownUnitProgressForClass(UnitClass);

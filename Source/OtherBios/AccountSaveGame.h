@@ -48,10 +48,30 @@ struct FAccountFactionEffectRecord
 	int32 UnitCount = 0;
 };
 
+
+
+/**
+ * Persisted deployment slot for the saved player army.
+ */
+USTRUCT(BlueprintType)
+struct FAccountDeploymentSlotRecord
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Deployment")
+	int32 UnitIndex = INDEX_NONE;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Deployment")
+	int32 Q = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Deployment")
+	int32 R = 0;
+};
+
 /**
  * Disk-backed account data.
  * Character progression is stored by class, while army composition preserves
- * slot order and duplicate classes. Deployment coordinates remain session-only.
+ * slot order and duplicate classes. Deployment coordinates are also persisted.
  */
 UCLASS()
 class OTHERBIOS_API UAccountSaveGame : public USaveGame
@@ -62,7 +82,7 @@ public:
 	virtual void Serialize(FArchive& Ar) override;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account")
-	int32 SaveVersion = 3;
+	int32 SaveVersion = 4;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Progression")
 	TArray<FAccountUnitProgressRecord> UnitProgress;
@@ -75,6 +95,9 @@ public:
 	// validated/rebuilt from the saved army composition after loading.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Faction Effects")
 	TArray<FAccountFactionEffectRecord> FactionEffects;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Deployment")
+	TArray<FAccountDeploymentSlotRecord> SavedDeploymentSlots;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Currency")
 	int32 Coins = 0;

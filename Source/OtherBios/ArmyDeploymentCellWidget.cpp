@@ -2,14 +2,43 @@
 
 #include "GameLoadingGameInstance.h"
 #include "ArmyDeploymentWidget.h"
+#include "Blueprint/WidgetTree.h"
 #include "Components/Button.h"
 #include "Components/Image.h"
 #include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Components/Widget.h"
 #include "Engine/Texture2D.h"
+#include "InputCoreTypes.h"
 #include "Styling/SlateBrush.h"
 #include "Styling/SlateTypes.h"
+
+
+namespace
+{
+	void HideLegacyDeploymentCellChrome(UArmyDeploymentCellWidget* CellWidget, UImage* PortraitImage)
+	{
+		if (!CellWidget || !CellWidget->WidgetTree)
+		{
+			return;
+		}
+
+		TArray<UWidget*> Widgets;
+		CellWidget->WidgetTree->GetAllWidgets(Widgets);
+		for (UWidget* Widget : Widgets)
+		{
+			if (UImage* Image = Cast<UImage>(Widget))
+			{
+				if (Image != PortraitImage)
+				{
+					// The orange hexes now come from the field photo itself. Any old cell image
+					// (dark hex, blocked hex, selection fill, line marker) would be a duplicate grid.
+					Image->SetVisibility(ESlateVisibility::Collapsed);
+				}
+			}
+		}
+	}
+}
 
 void UArmyDeploymentCellWidget::NativeConstruct()
 {
@@ -20,9 +49,21 @@ void UArmyDeploymentCellWidget::NativeConstruct()
 		LoadingGameInstance->BindButtonClickSounds(this);
 	}
 
+	HideLegacyDeploymentCellChrome(this, UnitPortraitImage);
 	BindButton();
 	ApplyRuntimeLayout();
 	RefreshVisuals();
+}
+
+FReply UArmyDeploymentCellWidget::NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent)
+{
+	if (bAllowedCell && OwnerDeploymentWidget && InMouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
+	{
+		HandleCellClicked();
+		return FReply::Handled();
+	}
+
+	return Super::NativeOnMouseButtonDown(InGeometry, InMouseEvent);
 }
 
 void UArmyDeploymentCellWidget::InitializeCell(UArmyDeploymentWidget* InOwnerDeploymentWidget, int32 InQ, int32 InR, bool bInAllowedCell)
@@ -36,6 +77,7 @@ void UArmyDeploymentCellWidget::InitializeCell(UArmyDeploymentWidget* InOwnerDep
 	bSelectedCell = false;
 	bDeploymentLineCell = false;
 
+	HideLegacyDeploymentCellChrome(this, UnitPortraitImage);
 	BindButton();
 	ApplyRuntimeLayout();
 	RefreshVisuals();
@@ -159,33 +201,24 @@ void UArmyDeploymentCellWidget::RefreshVisuals()
 
 	if (UnitPortraitImage)
 	{
-		if (DefaultUnit && DefaultUnit->UnitPortrait)
-		{
-			// Do not match the real texture size here. Portrait textures are usually huge
-			// and will overflow the deployment cell.
-			UnitPortraitImage->SetBrushFromTexture(DefaultUnit->UnitPortrait, false);
-			UnitPortraitImage->SetBrushSize(FVector2D(RuntimePortraitSize, RuntimePortraitSize));
-			UnitPortraitImage->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-		}
-		else
-		{
-			UnitPortraitImage->SetVisibility(ESlateVisibility::Collapsed);
-		}
+		// v5 draws portraits directly in ArmyDeploymentWidget above the photo. Keeping the
+		// old Blueprint portrait slot hidden prevents its tiny/clipped copy from showing.
+		UnitPortraitImage->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
 	if (BlockedOverlay)
 	{
-		BlockedOverlay->SetVisibility((!bAllowedCell && bShowBlockedOverlay) ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+		BlockedOverlay->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
 	if (SelectedOverlay)
 	{
-		SelectedOverlay->SetVisibility(bSelectedCell ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+		SelectedOverlay->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
 	if (DeploymentLineOverlay)
 	{
-		DeploymentLineOverlay->SetVisibility((bAllowedCell && bDeploymentLineCell) ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+		DeploymentLineOverlay->SetVisibility(ESlateVisibility::Collapsed);
 	}
 
 	if (CellButton)
@@ -193,5 +226,6 @@ void UArmyDeploymentCellWidget::RefreshVisuals()
 		CellButton->SetIsEnabled(bAllowedCell);
 	}
 
-	SetRenderOpacity(bAllowedCell ? 1.0f : 0.28f);
+	// Never dim the whole widget: doing so also dims placed portraits.
+	SetRenderOpacity(1.0f);
 }

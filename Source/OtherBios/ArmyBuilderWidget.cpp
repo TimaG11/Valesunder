@@ -31,6 +31,7 @@ TMap<UClass*, FArmyBuilderUnitProgress> UArmyBuilderWidget::SavedRosterUnitProgr
 int32 UArmyBuilderWidget::CachedPreviewArmyPower = 0;
 int32 UArmyBuilderWidget::SavedCoins = 0;
 TArray<FAccountFactionEffectRecord> UArmyBuilderWidget::SavedFactionEffectRecords;
+TArray<FAccountDeploymentSlotRecord> UArmyBuilderWidget::PendingPersistentDeploymentRecords;
 
 int32 UArmyBuilderWidget::GetSavedCoins()
 {
@@ -169,6 +170,26 @@ void UArmyBuilderWidget::ImportPersistentFactionEffects(const TArray<FAccountFac
 		SavedFactionEffectRecords.Num());
 }
 
+
+void UArmyBuilderWidget::ExportPersistentDeployment(TArray<FAccountDeploymentSlotRecord>& OutRecords)
+{
+	OutRecords.Reset();
+	OutRecords.Reserve(SavedPlayerArmyDeploymentSlots.Num());
+
+	for (const FArmyBuilderDeploymentSlot& DeploymentSlot : SavedPlayerArmyDeploymentSlots)
+	{
+		FAccountDeploymentSlotRecord& Record = OutRecords.AddDefaulted_GetRef();
+		Record.UnitIndex = DeploymentSlot.UnitIndex;
+		Record.Q = DeploymentSlot.Q;
+		Record.R = DeploymentSlot.R;
+	}
+}
+
+void UArmyBuilderWidget::ImportPersistentDeployment(const TArray<FAccountDeploymentSlotRecord>& Records)
+{
+	PendingPersistentDeploymentRecords = Records;
+}
+
 void UArmyBuilderWidget::ImportPersistentArmyAndCoins(const TArray<TSoftClassPtr<AHexUnitActor>>& ArmyClasses, int32 Coins)
 {
 	SavedPlayerArmyUnitClasses.Reset();
@@ -199,6 +220,34 @@ void UArmyBuilderWidget::ImportPersistentArmyAndCoins(const TArray<TSoftClassPtr
 		SavedPlayerArmyUnitProgress.Add(MakeProgressForAddedUnit(UnitClass));
 	}
 	NormalizeProgressListForArmy(SavedPlayerArmyUnitClasses, SavedPlayerArmyUnitProgress);
+
+	if (PendingPersistentDeploymentRecords.Num() == SavedPlayerArmyUnitClasses.Num())
+	{
+		TSet<int32> UsedUnitIndexes;
+		TSet<FIntPoint> UsedCoords;
+		bool bValidDeployment = true;
+
+		for (const FAccountDeploymentSlotRecord& Record : PendingPersistentDeploymentRecords)
+		{
+			const FIntPoint Coord(Record.Q, Record.R);
+			if (Record.UnitIndex < 0 || Record.UnitIndex >= SavedPlayerArmyUnitClasses.Num() ||
+				UsedUnitIndexes.Contains(Record.UnitIndex) || UsedCoords.Contains(Coord))
+			{
+				bValidDeployment = false;
+				break;
+			}
+
+			UsedUnitIndexes.Add(Record.UnitIndex);
+			UsedCoords.Add(Coord);
+			SavedPlayerArmyDeploymentSlots.Add(FArmyBuilderDeploymentSlot(Record.UnitIndex, Record.Q, Record.R));
+		}
+
+		if (!bValidDeployment || SavedPlayerArmyDeploymentSlots.Num() != SavedPlayerArmyUnitClasses.Num())
+		{
+			SavedPlayerArmyDeploymentSlots.Reset();
+		}
+	}
+	PendingPersistentDeploymentRecords.Reset();
 
 	// The saved icon snapshot is restored by AccountSaveGame::Serialize, but the
 	// composition is authoritative. Rebuild now so old saves (without records) and
@@ -232,6 +281,7 @@ void UArmyBuilderWidget::ResetSessionAccountState()
 	SavedPlayerArmyUnitProgress.Reset();
 	SavedRosterUnitProgress.Reset();
 	SavedFactionEffectRecords.Reset();
+	PendingPersistentDeploymentRecords.Reset();
 	SavedCoins = 0;
 	CachedPreviewArmyPower = 0;
 }
@@ -811,6 +861,7 @@ bool UArmyBuilderWidget::SaveArmyDeployment(const TArray<FArmyBuilderDeploymentS
 
 	SaveSelectedArmyForBattle();
 	SavedPlayerArmyDeploymentSlots = NewDeploymentSlots;
+	RequestPersistentAccountSave();
 
 	UE_LOG(LogTemp, Log, TEXT("Army deployment saved: Units=%d."), SavedPlayerArmyDeploymentSlots.Num());
 	UpdateAllVisuals();

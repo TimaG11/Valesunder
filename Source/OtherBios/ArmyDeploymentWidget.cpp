@@ -1,28 +1,112 @@
 #include "ArmyDeploymentWidget.h"
 
-#include "GameLoadingGameInstance.h"
 #include "ArmyDeploymentCellWidget.h"
 #include "ArmyUnitCardWidget.h"
 #include "Components/Button.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
+#include "Components/Image.h"
 #include "Components/PanelSlot.h"
 #include "Components/PanelWidget.h"
 #include "Components/ScrollBoxSlot.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBoxSlot.h"
+#include "Blueprint/WidgetTree.h"
+#include "Engine/Texture2D.h"
+
+namespace
+{
+	constexpr int32 PhotoCoordBase = 100000;
+	constexpr int32 PhotoCoordScale = 10000;
+
+	int32 EncodePhotoCoord(float NormalizedValue)
+	{
+		return PhotoCoordBase + FMath::Clamp(FMath::RoundToInt(NormalizedValue * static_cast<float>(PhotoCoordScale)), 0, PhotoCoordScale);
+	}
+
+	bool IsEncodedPhotoCoord(int32 Q, int32 R)
+	{
+		return Q >= PhotoCoordBase && Q <= PhotoCoordBase + PhotoCoordScale
+			&& R >= PhotoCoordBase && R <= PhotoCoordBase + PhotoCoordScale;
+	}
+}
 
 void UArmyDeploymentWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 
-	if (UGameLoadingGameInstance* LoadingGameInstance = Cast<UGameLoadingGameInstance>(GetGameInstance()))
-	{
-		LoadingGameInstance->BindButtonClickSounds(this);
-	}
-
+	EnsureDeploymentFieldBackground();
 	BindButtons();
 	RefreshAllVisuals();
+}
+
+void UArmyDeploymentWidget::EnsureDeploymentFieldBackground()
+{
+	if (!DeploymentGridPanel || !WidgetTree)
+	{
+		return;
+	}
+
+	UTexture2D* TextureToUse = DeploymentFieldTexture;
+	FSlateBrush DesignerBrush;
+	bool bHasDesignerBrush = false;
+
+	if (DeploymentFieldImage)
+	{
+		DesignerBrush = DeploymentFieldImage->GetBrush();
+		bHasDesignerBrush = DesignerBrush.GetResourceObject() != nullptr;
+
+		if (!TextureToUse)
+		{
+			TextureToUse = Cast<UTexture2D>(DesignerBrush.GetResourceObject());
+		}
+	}
+
+	if (!RuntimeDeploymentFieldImage)
+	{
+		RuntimeDeploymentFieldImage = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass(), TEXT("RuntimeDeploymentFieldImage"));
+		if (RuntimeDeploymentFieldImage)
+		{
+			if (UCanvasPanelSlot* BackgroundSlot = DeploymentGridPanel->AddChildToCanvas(RuntimeDeploymentFieldImage))
+			{
+				BackgroundSlot->SetAnchors(FAnchors(0.0f, 0.0f, 1.0f, 1.0f));
+				BackgroundSlot->SetOffsets(FMargin(0.0f));
+				BackgroundSlot->SetAlignment(FVector2D::ZeroVector);
+				BackgroundSlot->SetAutoSize(false);
+				BackgroundSlot->SetZOrder(-100);
+			}
+		}
+	}
+
+	if (!RuntimeDeploymentFieldImage)
+	{
+		return;
+	}
+
+	if (TextureToUse)
+	{
+		RuntimeDeploymentFieldImage->SetBrushFromTexture(TextureToUse, false);
+		RuntimeDeploymentFieldImage->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		UE_LOG(LogTemp, Log, TEXT("Deployment photo background active: %s"), *GetNameSafe(TextureToUse));
+	}
+	else if (bHasDesignerBrush)
+	{
+		RuntimeDeploymentFieldImage->SetBrush(DesignerBrush);
+		RuntimeDeploymentFieldImage->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		UE_LOG(LogTemp, Log, TEXT("Deployment photo background copied from designer brush."));
+	}
+	else
+	{
+		RuntimeDeploymentFieldImage->SetVisibility(ESlateVisibility::Collapsed);
+		UE_LOG(LogTemp, Error, TEXT("Deployment photo is missing. Set Army Deployment|Photo|Deployment Field Texture or assign a brush to DeploymentFieldImage."));
+	}
+
+	// The old designer Image is intentionally hidden after we copied its brush.
+	// This prevents a white/empty brush in the nested SizeBox from covering the runtime photo.
+	if (DeploymentFieldImage && RuntimeDeploymentFieldImage->GetVisibility() != ESlateVisibility::Collapsed)
+	{
+		DeploymentFieldImage->SetVisibility(ESlateVisibility::Collapsed);
+	}
 }
 
 void UArmyDeploymentWidget::InitializeDeployment(UArmyBuilderWidget* InOwnerArmyBuilder, const TArray<TSubclassOf<AHexUnitActor>>& InUnitClasses, const TArray<FArmyBuilderDeploymentSlot>& InSavedDeploymentSlots)
@@ -53,6 +137,18 @@ void UArmyDeploymentWidget::InitializeDeployment(UArmyBuilderWidget* InOwnerArmy
 	RebuildUnitCards();
 	RebuildGrid();
 	RefreshAllVisuals();
+}
+
+FArmyBuilderUnitProgress UArmyDeploymentWidget::GetDeploymentUnitProgressAt(int32 UnitIndex) const
+{
+	if (OwnerArmyBuilder && UnitClasses.IsValidIndex(UnitIndex))
+	{
+		return OwnerArmyBuilder->GetSelectedUnitProgressAt(UnitIndex);
+	}
+
+	return UnitClasses.IsValidIndex(UnitIndex)
+		? UArmyBuilderWidget::MakeDefaultUnitProgress(UnitClasses[UnitIndex])
+		: FArmyBuilderUnitProgress();
 }
 
 void UArmyDeploymentWidget::SelectUnitForDeployment(int32 UnitIndex)
@@ -198,11 +294,6 @@ void UArmyDeploymentWidget::RebuildUnitCards()
 
 		CardWidget->InitializeDeploymentPickCard(this, UnitClasses[Index], Index);
 
-		if (UGameLoadingGameInstance* LoadingGameInstance = Cast<UGameLoadingGameInstance>(GetGameInstance()))
-		{
-			LoadingGameInstance->BindButtonClickSounds(CardWidget);
-		}
-
 		if (UPanelSlot* PanelSlot = DeploymentUnitsPanel->AddChild(CardWidget))
 		{
 			if (UVerticalBoxSlot* VerticalBoxSlot = Cast<UVerticalBoxSlot>(PanelSlot))
@@ -221,15 +312,22 @@ void UArmyDeploymentWidget::RebuildUnitCards()
 
 void UArmyDeploymentWidget::RebuildGrid()
 {
-	CellWidgets.Reset();
-
 	if (!DeploymentGridPanel)
 	{
 		UE_LOG(LogTemp, Error, TEXT("DeploymentGridPanel is missing. In WBP_ArmyDeployment it must be a CanvasPanel named DeploymentGridPanel."));
 		return;
 	}
 
-	DeploymentGridPanel->ClearChildren();
+	for (int32 ChildIndex = DeploymentGridPanel->GetChildrenCount() - 1; ChildIndex >= 0; --ChildIndex)
+	{
+		if (Cast<UArmyDeploymentCellWidget>(DeploymentGridPanel->GetChildAt(ChildIndex)))
+		{
+			DeploymentGridPanel->RemoveChildAt(ChildIndex);
+		}
+	}
+
+	EnsureDeploymentFieldBackground();
+	CellWidgets.Reset();
 
 	if (!DeploymentCellWidgetClass)
 	{
@@ -237,110 +335,92 @@ void UArmyDeploymentWidget::RebuildGrid()
 		return;
 	}
 
-	struct FPreviewCellData
+	if (!bUsePhotoAlignedGrid)
 	{
-		int32 Q = 0;
-		int32 R = 0;
-		FVector2D RawPosition = FVector2D::ZeroVector;
-	};
-
-	TArray<FPreviewCellData> PreviewCells;
-
-	const int32 Step = FMath::Max(1, DisplayCoordStep);
-
-	float MinX = TNumericLimits<float>::Max();
-	float MinY = TNumericLimits<float>::Max();
-
-	for (int32 Q = DisplayQMin; Q <= DisplayQMax; Q += Step)
-	{
-		const int32 ColumnIndex = (Q - DisplayQMin) / Step;
-
-		for (int32 R = DisplayRMin; R <= DisplayRMax; R += Step)
-		{
-			const int32 RowIndex = (R - DisplayRMin) / Step;
-
-			float X = 0.0f;
-			float Y = 0.0f;
-
-			if (bUseStaggeredPreviewGrid)
-			{
-				// UI layout, not world projection: q grows to the right, each next q-column is shifted down.
-				// This makes the deployment screen readable and avoids the broken rectangular/overlapped look.
-				X = static_cast<float>(ColumnIndex) * HexHorizontalSpacing;
-				Y = static_cast<float>(RowIndex) * HexVerticalSpacing + ((ColumnIndex % 2) != 0 ? HexVerticalSpacing * 0.5f : 0.0f);
-			}
-			else
-			{
-				const float HexQ = static_cast<float>(Q) / static_cast<float>(Step);
-				const float HexR = static_cast<float>(R) / static_cast<float>(Step);
-
-				// Axial hex preview layout fallback.
-				X = (HexQ + HexR * 0.5f) * HexHorizontalSpacing;
-				Y = HexR * HexVerticalSpacing;
-			}
-
-			FPreviewCellData& NewCell = PreviewCells.AddDefaulted_GetRef();
-			NewCell.Q = Q;
-			NewCell.R = R;
-			NewCell.RawPosition = FVector2D(X, Y);
-
-			MinX = FMath::Min(MinX, X);
-			MinY = FMath::Min(MinY, Y);
-		}
-	}
-
-	if (PreviewCells.IsEmpty())
-	{
+		UE_LOG(LogTemp, Warning, TEXT("Legacy deployment grid is disabled in v4. Enable bUsePhotoAlignedGrid."));
 		return;
 	}
 
-	const FVector2D GlobalOffset(GridPaddingX - MinX, GridPaddingY - MinY);
+	const int32 Columns = FMath::Max(2, PhotoColumnCount);
+	const int32 Rows = FMath::Max(2, PhotoRowCount);
+	const float SafeLeft = FMath::Clamp(FMath::Min(PhotoGridLeft, PhotoGridRight), 0.0f, 1.0f);
+	const float SafeRight = FMath::Clamp(FMath::Max(PhotoGridLeft, PhotoGridRight), 0.0f, 1.0f);
+	const float SafeTop = FMath::Clamp(FMath::Min(PhotoGridTop, PhotoGridBottom), 0.0f, 1.0f);
+	const float SafeBottom = FMath::Clamp(FMath::Max(PhotoGridTop, PhotoGridBottom), 0.0f, 1.0f);
+	const float StepX = (SafeRight - SafeLeft) / static_cast<float>(Columns - 1);
+	const float StepY = (SafeBottom - SafeTop) / static_cast<float>(Rows - 1);
 
-	for (const FPreviewCellData& CellData : PreviewCells)
+	const float ApproxPanelWidth = 720.0f;
+	const float ApproxPanelHeight = 400.0f;
+	const float RuntimeWidth = FMath::Max(18.0f, StepX * ApproxPanelWidth * PhotoHitboxScale);
+	const float RuntimeHeight = FMath::Max(18.0f, StepY * ApproxPanelHeight * PhotoHitboxScale);
+
+	for (int32 RowIndex = 0; RowIndex < Rows; ++RowIndex)
 	{
-		UArmyDeploymentCellWidget* CellWidget = CreateWidget<UArmyDeploymentCellWidget>(this, DeploymentCellWidgetClass);
-		if (!CellWidget)
+		const bool bShortRow = bPhotoEvenRowsAreShort ? ((RowIndex % 2) == 0) : ((RowIndex % 2) != 0);
+		const int32 CellsThisRow = bShortRow ? Columns - 1 : Columns;
+		const float RowShift = bShortRow ? 0.5f : 0.0f;
+
+		for (int32 ColumnIndex = 0; ColumnIndex < CellsThisRow; ++ColumnIndex)
 		{
-			continue;
+			const float AnchorX = SafeLeft + (static_cast<float>(ColumnIndex) + RowShift) * StepX;
+			const float AnchorY = SafeTop + static_cast<float>(RowIndex) * StepY;
+
+			const float NormalizedX = (SafeRight > SafeLeft) ? FMath::Clamp((AnchorX - SafeLeft) / (SafeRight - SafeLeft), 0.0f, 1.0f) : 0.0f;
+			const float NormalizedY = (SafeBottom > SafeTop) ? FMath::Clamp((AnchorY - SafeTop) / (SafeBottom - SafeTop), 0.0f, 1.0f) : 0.0f;
+			const int32 EncodedQ = EncodePhotoCoord(NormalizedX);
+			const int32 EncodedR = EncodePhotoCoord(NormalizedY);
+
+			UArmyDeploymentCellWidget* CellWidget = CreateWidget<UArmyDeploymentCellWidget>(this, DeploymentCellWidgetClass);
+			if (!CellWidget)
+			{
+				continue;
+			}
+
+			CellWidget->SetRuntimeCellSize(RuntimeWidth, RuntimeHeight);
+			CellWidget->SetPortraitSize(FMath::Min(RuntimeWidth, RuntimeHeight) * 1.15f);
+			CellWidget->InitializeCell(this, EncodedQ, EncodedR, true);
+			CellWidget->SetDeploymentLineCell(false);
+
+			if (UCanvasPanelSlot* CanvasSlot = DeploymentGridPanel->AddChildToCanvas(CellWidget))
+			{
+				CanvasSlot->SetAutoSize(false);
+				CanvasSlot->SetSize(FVector2D(RuntimeWidth, RuntimeHeight));
+				CanvasSlot->SetAnchors(FAnchors(AnchorX, AnchorY));
+				CanvasSlot->SetPosition(FVector2D::ZeroVector);
+				CanvasSlot->SetAlignment(FVector2D(0.5f, 0.5f));
+				CanvasSlot->SetZOrder(20);
+			}
+
+			CellWidgets.Add(CellWidget);
 		}
-
-		CellWidget->SetRuntimeCellSize(HexCellWidth, HexCellHeight);
-		CellWidget->SetPortraitSize(GridUnitPortraitSize);
-
-		const bool bAllowedCell = IsCoordAllowed(CellData.Q, CellData.R);
-		CellWidget->InitializeCell(this, CellData.Q, CellData.R, bAllowedCell);
-
-		if (UGameLoadingGameInstance* LoadingGameInstance = Cast<UGameLoadingGameInstance>(GetGameInstance()))
-		{
-			LoadingGameInstance->BindButtonClickSounds(CellWidget);
-		}
-		CellWidget->SetDeploymentLineCell(IsDeploymentLineCell(CellData.Q, CellData.R));
-
-		if (UCanvasPanelSlot* CanvasSlot = DeploymentGridPanel->AddChildToCanvas(CellWidget))
-		{
-			CanvasSlot->SetAutoSize(false);
-			CanvasSlot->SetSize(FVector2D(HexCellWidth, HexCellHeight));
-			CanvasSlot->SetPosition(CellData.RawPosition + GlobalOffset);
-			CanvasSlot->SetAlignment(FVector2D(0.0f, 0.0f));
-			CanvasSlot->SetZOrder(bAllowedCell ? 2 : 1);
-		}
-
-		CellWidgets.Add(CellWidget);
 	}
 
 	if (EnemyDirectionTextBlock)
 	{
-		EnemyDirectionTextBlock->SetText(NSLOCTEXT("ArmyDeployment", "EnemyDirection", "ENEMY SIDE  ->"));
+		EnemyDirectionTextBlock->SetText(FText::GetEmpty());
 	}
-
 	if (PlayerDirectionTextBlock)
 	{
-		PlayerDirectionTextBlock->SetText(NSLOCTEXT("ArmyDeployment", "PlayerDirection", "<-  YOUR DEPLOYMENT"));
+		PlayerDirectionTextBlock->SetText(FText::GetEmpty());
 	}
+
+	UE_LOG(LogTemp, Log, TEXT("Photo deployment v4 rebuilt: visible cells=%d. Every photo cell is selectable."), CellWidgets.Num());
 }
 
 void UArmyDeploymentWidget::RefreshAllVisuals()
 {
+	// Rebuild the few visible unit portraits as direct children of DeploymentGridPanel.
+	// The legacy cell Blueprint has a very small portrait slot, which is why portraits
+	// previously appeared as thin slivers even when BrushSize was increased in C++.
+	for (UImage* PortraitImage : RuntimePhotoPortraitImages)
+	{
+		if (PortraitImage)
+		{
+			PortraitImage->RemoveFromParent();
+		}
+	}
+	RuntimePhotoPortraitImages.Reset();
 	for (UArmyDeploymentCellWidget* CellWidget : CellWidgets)
 	{
 		if (!CellWidget)
@@ -353,6 +433,41 @@ void UArmyDeploymentWidget::RefreshAllVisuals()
 		const int32 UnitIndex = FindUnitIndexAtCoord(Q, R);
 
 		CellWidget->SetPlacedUnit(UnitClasses.IsValidIndex(UnitIndex) ? UnitClasses[UnitIndex] : nullptr, UnitIndex);
+
+		if (bUsePhotoAlignedGrid && DeploymentGridPanel && WidgetTree && UnitClasses.IsValidIndex(UnitIndex))
+		{
+			const AHexUnitActor* DefaultUnit = UnitClasses[UnitIndex]
+				? UnitClasses[UnitIndex]->GetDefaultObject<AHexUnitActor>()
+				: nullptr;
+
+			if (DefaultUnit && DefaultUnit->UnitPortrait)
+			{
+				if (UCanvasPanelSlot* CellCanvasSlot = Cast<UCanvasPanelSlot>(CellWidget->Slot))
+				{
+					UImage* PortraitImage = WidgetTree->ConstructWidget<UImage>(UImage::StaticClass());
+					if (PortraitImage)
+					{
+						const float PortraitSize = FMath::Max(20.0f, PhotoUnitPortraitSize);
+						PortraitImage->SetBrushFromTexture(DefaultUnit->UnitPortrait, false);
+						PortraitImage->SetDesiredSizeOverride(FVector2D(PortraitSize, PortraitSize));
+						PortraitImage->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+
+						if (UCanvasPanelSlot* PortraitSlot = DeploymentGridPanel->AddChildToCanvas(PortraitImage))
+						{
+							PortraitSlot->SetAutoSize(false);
+							PortraitSlot->SetSize(FVector2D(PortraitSize, PortraitSize));
+							PortraitSlot->SetAnchors(CellCanvasSlot->GetAnchors());
+							PortraitSlot->SetPosition(FVector2D::ZeroVector);
+							PortraitSlot->SetAlignment(FVector2D(0.5f, 0.5f));
+							PortraitSlot->SetZOrder(30);
+						}
+
+						RuntimePhotoPortraitImages.Add(PortraitImage);
+					}
+				}
+			}
+		}
+
 		CellWidget->SetSelectedCell(UnitClasses.IsValidIndex(SelectedUnitIndex) && UnitIndex == SelectedUnitIndex);
 		CellWidget->SetDeploymentLineCell(IsDeploymentLineCell(Q, R));
 	}
@@ -417,15 +532,14 @@ void UArmyDeploymentWidget::AutoFillDeploymentIfNeeded()
 		return;
 	}
 
-	// Prefer the same deployment pattern that HexGridActor uses by default.
-	// This stops the preview from putting all units into one ugly top row.
 	const FIntPoint PreferredCoords[] =
 	{
-		FIntPoint(-4, 0),
+		// Stock formation on the four left columns of the photo.
+		FIntPoint(-6, 0),
 		FIntPoint(-6, 2),
-		FIntPoint(-4, -2),
-		FIntPoint(-2, -4),
-		FIntPoint(-6, 4)
+		FIntPoint(-5, -1),
+		FIntPoint(-5, 2),
+		FIntPoint(-4, 0)
 	};
 
 	int32 NextUnitIndex = 0;
@@ -461,6 +575,11 @@ void UArmyDeploymentWidget::AutoFillDeploymentIfNeeded()
 
 bool UArmyDeploymentWidget::IsCoordAllowed(int32 Q, int32 R) const
 {
+	if (bUsePhotoAlignedGrid)
+	{
+		return IsEncodedPhotoCoord(Q, R);
+	}
+
 	if (!AllowedDeploymentCoords.IsEmpty())
 	{
 		for (const FArmyBuilderDeploymentSlot& Coord : AllowedDeploymentCoords)
@@ -470,7 +589,6 @@ bool UArmyDeploymentWidget::IsCoordAllowed(int32 Q, int32 R) const
 				return true;
 			}
 		}
-
 		return false;
 	}
 
@@ -497,6 +615,11 @@ bool UArmyDeploymentWidget::IsCoordUsed(int32 Q, int32 R, int32 IgnoreUnitIndex)
 
 bool UArmyDeploymentWidget::IsDeploymentLineCell(int32 Q, int32 R) const
 {
+	if (bUsePhotoAlignedGrid)
+	{
+		return false;
+	}
+
 	if (!IsCoordAllowed(Q, R))
 	{
 		return false;
@@ -588,8 +711,27 @@ bool UArmyDeploymentWidget::HasCompleteDeployment() const
 TArray<FIntPoint> UArmyDeploymentWidget::GetAllowedCoordsInDisplayOrder() const
 {
 	TArray<FIntPoint> Result;
-	const int32 Step = FMath::Max(1, DisplayCoordStep);
 
+	if (bUsePhotoAlignedGrid)
+	{
+		const int32 Columns = FMath::Max(2, PhotoColumnCount);
+		const int32 Rows = FMath::Max(2, PhotoRowCount);
+		for (int32 RowIndex = 0; RowIndex < Rows; ++RowIndex)
+		{
+			const bool bShortRow = bPhotoEvenRowsAreShort ? ((RowIndex % 2) == 0) : ((RowIndex % 2) != 0);
+			const int32 CellsThisRow = bShortRow ? Columns - 1 : Columns;
+			const float RowShift = bShortRow ? 0.5f : 0.0f;
+			for (int32 ColumnIndex = 0; ColumnIndex < CellsThisRow; ++ColumnIndex)
+			{
+				const float NormalizedX = FMath::Clamp((static_cast<float>(ColumnIndex) + RowShift) / static_cast<float>(Columns - 1), 0.0f, 1.0f);
+				const float NormalizedY = FMath::Clamp(static_cast<float>(RowIndex) / static_cast<float>(Rows - 1), 0.0f, 1.0f);
+				Result.Add(FIntPoint(EncodePhotoCoord(NormalizedX), EncodePhotoCoord(NormalizedY)));
+			}
+		}
+		return Result;
+	}
+
+	const int32 Step = FMath::Max(1, DisplayCoordStep);
 	for (int32 R = DisplayRMin; R <= DisplayRMax; R += Step)
 	{
 		for (int32 Q = DisplayQMin; Q <= DisplayQMax; Q += Step)
@@ -600,6 +742,5 @@ TArray<FIntPoint> UArmyDeploymentWidget::GetAllowedCoordsInDisplayOrder() const
 			}
 		}
 	}
-
 	return Result;
 }

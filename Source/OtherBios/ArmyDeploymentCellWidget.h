@@ -43,6 +43,7 @@ public:
 
 protected:
 	virtual void NativeConstruct() override;
+	virtual FReply NativeOnMouseButtonDown(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	UButton* CellButton = nullptr;
