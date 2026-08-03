@@ -391,7 +391,8 @@ void UArmyDeploymentWidget::RebuildGrid()
 
 			CellWidget->SetRuntimeCellSize(RuntimeWidth, RuntimeHeight);
 			CellWidget->SetPortraitSize(FMath::Min(RuntimeWidth, RuntimeHeight) * 1.15f);
-			CellWidget->InitializeCell(this, EncodedQ, EncodedR, true);
+			const bool bAllowedForPlayer = ColumnIndex < FMath::Clamp(PhotoAllowedPlayerColumns, 1, Columns);
+			CellWidget->InitializeCell(this, EncodedQ, EncodedR, bAllowedForPlayer);
 			CellWidget->SetDeploymentLineCell(false);
 
 			if (UCanvasPanelSlot* CanvasSlot = DeploymentGridPanel->AddChildToCanvas(CellWidget))
@@ -417,7 +418,7 @@ void UArmyDeploymentWidget::RebuildGrid()
 		PlayerDirectionTextBlock->SetText(FText::GetEmpty());
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("Photo deployment v6 exact-cell grid rebuilt: visible cells=%d. Every photo cell is selectable."), CellWidgets.Num());
+	UE_LOG(LogTemp, Log, TEXT("Photo deployment v7 grid rebuilt: visible cells=%d PlayerColumns=%d. Only the left deployment zone is selectable."), CellWidgets.Num(), FMath::Clamp(PhotoAllowedPlayerColumns, 1, Columns));
 }
 
 void UArmyDeploymentWidget::RefreshAllVisuals()
@@ -589,7 +590,13 @@ bool UArmyDeploymentWidget::IsCoordAllowed(int32 Q, int32 R) const
 {
 	if (bUsePhotoAlignedGrid)
 	{
-		return IsEncodedPhotoCoord(Q, R);
+		if (!IsEncodedPhotoCoord(Q, R))
+		{
+			return false;
+		}
+
+		const int32 PhotoColumn = Q - ExactPhotoCellBase;
+		return PhotoColumn >= 0 && PhotoColumn < FMath::Clamp(PhotoAllowedPlayerColumns, 1, FMath::Max(2, PhotoColumnCount));
 	}
 
 	if (!AllowedDeploymentCoords.IsEmpty())
@@ -732,7 +739,8 @@ TArray<FIntPoint> UArmyDeploymentWidget::GetAllowedCoordsInDisplayOrder() const
 		{
 			const bool bShortRow = bPhotoEvenRowsAreShort ? ((RowIndex % 2) == 0) : ((RowIndex % 2) != 0);
 			const int32 CellsThisRow = bShortRow ? Columns - 1 : Columns;
-			for (int32 ColumnIndex = 0; ColumnIndex < CellsThisRow; ++ColumnIndex)
+			const int32 AllowedColumns = FMath::Clamp(PhotoAllowedPlayerColumns, 1, Columns);
+			for (int32 ColumnIndex = 0; ColumnIndex < FMath::Min(CellsThisRow, AllowedColumns); ++ColumnIndex)
 			{
 				Result.Add(FIntPoint(EncodePhotoColumn(ColumnIndex), EncodePhotoRow(RowIndex)));
 			}

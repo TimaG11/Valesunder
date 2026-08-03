@@ -3316,7 +3316,8 @@ bool AHexGridActor::TrySpawnArmyBuilderArmies()
 
 			if (DecodeExactPhotoCell(Slot.Q, Slot.R, PhotoColumn, PhotoRow))
 			{
-				if (VisualRows.IsEmpty() || PhotoRow < 0 || PhotoRow >= PhotoRows || PhotoColumn < 0)
+				constexpr int32 PlayerAllowedPhotoColumns = 4;
+				if (VisualRows.IsEmpty() || PhotoRow < 0 || PhotoRow >= PhotoRows || PhotoColumn < 0 || PhotoColumn >= PlayerAllowedPhotoColumns)
 				{
 					bCustomDeploymentValid = false;
 					break;
@@ -3620,6 +3621,219 @@ bool AHexGridActor::TrySpawnArmyBuilderArmies()
 		FinalEnemyChampionCount,
 		*UEnum::GetValueAsString(EnemyBotDifficulty)
 	);
+
+
+	// Build a mirrored enemy deployment zone from the real battlefield topology.
+	// Player uses the four leftmost visual columns; enemy uses the four rightmost.
+	// The centre is intentionally neutral and cannot contain initial units.
+	struct FEnemyFormationCell
+	{
+		FHexCoord Coord;
+		FVector Local = FVector::ZeroVector;
+		float FrontRank = 0.0f; // 1 = closest to player/centre, 0 = far back edge.
+		float CentreRank = 0.0f; // 1 = near vertical centre of the formation.
+	};
+
+	TArray<FEnemyFormationCell> EnemyFormationCandidates;
+	{
+		struct FVisualCell
+		{
+			FHexCoord Coord;
+			FVector Local = FVector::ZeroVector;
+		};
+
+		TArray<FVisualCell> AllVisualCells;
+		AllVisualCells.Reserve(Cells.Num());
+		for (const FHexCell& Cell : Cells)
+		{
+			FVisualCell& Entry = AllVisualCells.AddDefaulted_GetRef();
+			Entry.Coord = FHexCoord(Cell.Q, Cell.R);
+			Entry.Local = AxialToLocal(Cell.Q, Cell.R);
+		}
+
+		AllVisualCells.Sort([](const FVisualCell& A, const FVisualCell& B)
+		{
+			if (!FMath::IsNearlyEqual(A.Local.Y, B.Local.Y, 0.1f))
+			{
+				return A.Local.Y < B.Local.Y;
+			}
+			return A.Local.X < B.Local.X;
+		});
+
+		TArray<TArray<FVisualCell>> Rows;
+		for (const FVisualCell& Cell : AllVisualCells)
+		{
+			if (Rows.IsEmpty() || !FMath::IsNearlyEqual(Rows.Last()[0].Local.Y, Cell.Local.Y, 0.1f))
+			{
+				Rows.AddDefaulted();
+			}
+			Rows.Last().Add(Cell);
+		}
+
+		float MinY = TNumericLimits<float>::Max();
+		float MaxY = -TNumericLimits<float>::Max();
+		for (const FVisualCell& Cell : AllVisualCells)
+		{
+			MinY = FMath::Min(MinY, Cell.Local.Y);
+			MaxY = FMath::Max(MaxY, Cell.Local.Y);
+		}
+		const float CentreY = (MinY + MaxY) * 0.5f;
+		const float HalfHeight = FMath::Max(1.0f, (MaxY - MinY) * 0.5f);
+		constexpr int32 EnemyAllowedColumnsPerRow = 4;
+
+		for (TArray<FVisualCell>& Row : Rows)
+		{
+			Row.Sort([](const FVisualCell& A, const FVisualCell& B)
+			{
+				return A.Local.X < B.Local.X;
+			});
+
+			const int32 FirstEnemyColumn = FMath::Max(0, Row.Num() - EnemyAllowedColumnsPerRow);
+			const int32 ZoneWidth = FMath::Max(1, Row.Num() - FirstEnemyColumn - 1);
+			for (int32 ColumnIndex = FirstEnemyColumn; ColumnIndex < Row.Num(); ++ColumnIndex)
+			{
+				const FVisualCell& Cell = Row[ColumnIndex];
+				const FIntPoint Key(Cell.Coord.Q, Cell.Coord.R);
+				if (ReservedPlayerCoords.Contains(Key))
+				{
+					continue;
+				}
+
+				FEnemyFormationCell& Candidate = EnemyFormationCandidates.AddDefaulted_GetRef();
+				Candidate.Coord = Cell.Coord;
+				Candidate.Local = Cell.Local;
+				// Left edge of the enemy zone faces the player and is therefore the front.
+				Candidate.FrontRank = 1.0f - static_cast<float>(ColumnIndex - FirstEnemyColumn) / static_cast<float>(ZoneWidth);
+				Candidate.CentreRank = 1.0f - FMath::Clamp(FMath::Abs(Cell.Local.Y - CentreY) / HalfHeight, 0.0f, 1.0f);
+			}
+		}
+	}
+
+	if (EnemyFormationCandidates.Num() >= EnemyArmyClasses.Num())
+	{
+		TArray<FHexCoord> SmartEnemyCoords;
+		SmartEnemyCoords.SetNum(EnemyArmyClasses.Num());
+		TSet<FIntPoint> UsedFormationCoords;
+
+		// Place units with the strongest positional requirements first.
+		TArray<int32> PlacementOrder;
+		for (int32 Index = 0; Index < EnemyArmyClasses.Num(); ++Index)
+		{
+			PlacementOrder.Add(Index);
+		}
+		PlacementOrder.Sort([&EnemyArmyClasses](int32 A, int32 B)
+		{
+			const AHexUnitActor* UA = EnemyArmyClasses[A] ? EnemyArmyClasses[A]->GetDefaultObject<AHexUnitActor>() : nullptr;
+			const AHexUnitActor* UB = EnemyArmyClasses[B] ? EnemyArmyClasses[B]->GetDefaultObject<AHexUnitActor>() : nullptr;
+			auto Priority = [](const AHexUnitActor* U)
+			{
+				if (!U) return 0;
+				if (U->UnitType == EHexUnitType::Healer) return 50;
+				if (U->UnitType == EHexUnitType::Ram) return 45;
+				if (U->AttackRange > 1) return 40;
+				if (U->UnitType == EHexUnitType::Support) return 35;
+				if (U->UnitType == EHexUnitType::Champion) return 30;
+				return 20;
+			};
+			return Priority(UA) > Priority(UB);
+		});
+
+		for (const int32 UnitIndex : PlacementOrder)
+		{
+			const AHexUnitActor* Unit = EnemyArmyClasses[UnitIndex]
+				? EnemyArmyClasses[UnitIndex]->GetDefaultObject<AHexUnitActor>()
+				: nullptr;
+
+			float BestScore = -TNumericLimits<float>::Max();
+			int32 BestCandidateIndex = INDEX_NONE;
+			for (int32 CandidateIndex = 0; CandidateIndex < EnemyFormationCandidates.Num(); ++CandidateIndex)
+			{
+				const FEnemyFormationCell& Candidate = EnemyFormationCandidates[CandidateIndex];
+				const FIntPoint Key(Candidate.Coord.Q, Candidate.Coord.R);
+				if (UsedFormationCoords.Contains(Key))
+				{
+					continue;
+				}
+
+				float Score = 0.0f;
+				if (!Unit)
+				{
+					Score = Candidate.CentreRank;
+				}
+				else if (Unit->UnitType == EHexUnitType::Ram)
+				{
+					Score = Candidate.FrontRank * 5.0f + Candidate.CentreRank * 1.5f;
+				}
+				else if (Unit->UnitType == EHexUnitType::Healer)
+				{
+					Score = (1.0f - Candidate.FrontRank) * 5.0f + Candidate.CentreRank * 3.0f;
+				}
+				else if (Unit->AttackRange > 1)
+				{
+					Score = (1.0f - Candidate.FrontRank) * 4.0f + Candidate.CentreRank * 1.5f;
+				}
+				else if (Unit->UnitType == EHexUnitType::Support)
+				{
+					Score = (1.0f - Candidate.FrontRank) * 3.0f + Candidate.CentreRank * 2.0f;
+				}
+				else if (Unit->UnitType == EHexUnitType::Champion)
+				{
+					const float DesiredFront = Unit->AttackRange > 1 ? 0.35f : 0.70f;
+					Score = 3.0f - FMath::Abs(Candidate.FrontRank - DesiredFront) * 4.0f + Candidate.CentreRank;
+				}
+				else
+				{
+					Score = Candidate.FrontRank * 4.0f + Candidate.CentreRank;
+				}
+
+				// Mild spacing bonus prevents the whole army from forming one vertical pile.
+				for (const FIntPoint& UsedCoord : UsedFormationCoords)
+				{
+					const FVector UsedLocal = AxialToLocal(UsedCoord.X, UsedCoord.Y);
+					Score += FMath::Clamp(FVector::Dist2D(Candidate.Local, UsedLocal) / FMath::Max(1.0f, HexRadius * 6.0f), 0.0f, 0.35f);
+				}
+
+				Score += FMath::FRandRange(0.0f, 0.12f); // small variation between battles.
+				if (Score > BestScore)
+				{
+					BestScore = Score;
+					BestCandidateIndex = CandidateIndex;
+				}
+			}
+
+			if (BestCandidateIndex != INDEX_NONE)
+			{
+				const FEnemyFormationCell& Chosen = EnemyFormationCandidates[BestCandidateIndex];
+				SmartEnemyCoords[UnitIndex] = Chosen.Coord;
+				UsedFormationCoords.Add(FIntPoint(Chosen.Coord.Q, Chosen.Coord.R));
+				UE_LOG(LogTemp, Log, TEXT("Enemy formation: Unit=%s Type=%s -> Q=%d R=%d Front=%.2f Centre=%.2f"),
+					*GetNameSafe(EnemyArmyClasses[UnitIndex].Get()),
+					Unit ? *UEnum::GetValueAsString(Unit->UnitType) : TEXT("Unknown"),
+					Chosen.Coord.Q, Chosen.Coord.R, Chosen.FrontRank, Chosen.CentreRank);
+			}
+		}
+
+		bool bAllAssigned = true;
+		for (const FHexCoord& Coord : SmartEnemyCoords)
+		{
+			if (!HasCell(Coord.Q, Coord.R))
+			{
+				bAllAssigned = false;
+				break;
+			}
+		}
+		if (bAllAssigned)
+		{
+			EnemySpawnCoords = SmartEnemyCoords;
+			EnemySpawnCount = EnemyArmyClasses.Num();
+			UE_LOG(LogTemp, Log, TEXT("Enemy smart formation applied: %d units in mirrored right deployment zone."), EnemySpawnCount);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Enemy smart formation fallback: only %d mirrored-zone cells for %d units."),
+			EnemyFormationCandidates.Num(), EnemyArmyClasses.Num());
+	}
 
 	if (PlayerSpawnCount < PlayerArmyClasses.Num())
 	{
