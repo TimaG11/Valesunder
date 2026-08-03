@@ -16,18 +16,30 @@
 
 namespace
 {
-	constexpr int32 PhotoCoordBase = 100000;
-	constexpr int32 PhotoCoordScale = 10000;
+	// v6: photo cells are saved as an exact discrete (column,row) address.
+	// This intentionally replaces the old normalized-position encoding, which forced
+	// HexGridActor to choose the nearest battle cell and could alter formations.
+	constexpr int32 ExactPhotoCellBase = 200000;
+	constexpr int32 LegacyPhotoCoordBase = 100000;
+	constexpr int32 LegacyPhotoCoordScale = 10000;
 
-	int32 EncodePhotoCoord(float NormalizedValue)
+	int32 EncodePhotoColumn(int32 ColumnIndex)
 	{
-		return PhotoCoordBase + FMath::Clamp(FMath::RoundToInt(NormalizedValue * static_cast<float>(PhotoCoordScale)), 0, PhotoCoordScale);
+		return ExactPhotoCellBase + FMath::Max(0, ColumnIndex);
+	}
+
+	int32 EncodePhotoRow(int32 RowIndex)
+	{
+		return ExactPhotoCellBase + FMath::Max(0, RowIndex);
 	}
 
 	bool IsEncodedPhotoCoord(int32 Q, int32 R)
 	{
-		return Q >= PhotoCoordBase && Q <= PhotoCoordBase + PhotoCoordScale
-			&& R >= PhotoCoordBase && R <= PhotoCoordBase + PhotoCoordScale;
+		const bool bExactCell = Q >= ExactPhotoCellBase && Q < ExactPhotoCellBase + 1000
+			&& R >= ExactPhotoCellBase && R < ExactPhotoCellBase + 1000;
+		const bool bLegacyNormalized = Q >= LegacyPhotoCoordBase && Q <= LegacyPhotoCoordBase + LegacyPhotoCoordScale
+			&& R >= LegacyPhotoCoordBase && R <= LegacyPhotoCoordBase + LegacyPhotoCoordScale;
+		return bExactCell || bLegacyNormalized;
 	}
 }
 
@@ -366,10 +378,10 @@ void UArmyDeploymentWidget::RebuildGrid()
 			const float AnchorX = SafeLeft + (static_cast<float>(ColumnIndex) + RowShift) * StepX;
 			const float AnchorY = SafeTop + static_cast<float>(RowIndex) * StepY;
 
-			const float NormalizedX = (SafeRight > SafeLeft) ? FMath::Clamp((AnchorX - SafeLeft) / (SafeRight - SafeLeft), 0.0f, 1.0f) : 0.0f;
-			const float NormalizedY = (SafeBottom > SafeTop) ? FMath::Clamp((AnchorY - SafeTop) / (SafeBottom - SafeTop), 0.0f, 1.0f) : 0.0f;
-			const int32 EncodedQ = EncodePhotoCoord(NormalizedX);
-			const int32 EncodedR = EncodePhotoCoord(NormalizedY);
+			// Store the exact photo-cell address, not a floating/normalized position.
+			// Q carries column index, R carries row index.
+			const int32 EncodedQ = EncodePhotoColumn(ColumnIndex);
+			const int32 EncodedR = EncodePhotoRow(RowIndex);
 
 			UArmyDeploymentCellWidget* CellWidget = CreateWidget<UArmyDeploymentCellWidget>(this, DeploymentCellWidgetClass);
 			if (!CellWidget)
@@ -405,7 +417,7 @@ void UArmyDeploymentWidget::RebuildGrid()
 		PlayerDirectionTextBlock->SetText(FText::GetEmpty());
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("Photo deployment v4 rebuilt: visible cells=%d. Every photo cell is selectable."), CellWidgets.Num());
+	UE_LOG(LogTemp, Log, TEXT("Photo deployment v6 exact-cell grid rebuilt: visible cells=%d. Every photo cell is selectable."), CellWidgets.Num());
 }
 
 void UArmyDeploymentWidget::RefreshAllVisuals()
@@ -720,12 +732,9 @@ TArray<FIntPoint> UArmyDeploymentWidget::GetAllowedCoordsInDisplayOrder() const
 		{
 			const bool bShortRow = bPhotoEvenRowsAreShort ? ((RowIndex % 2) == 0) : ((RowIndex % 2) != 0);
 			const int32 CellsThisRow = bShortRow ? Columns - 1 : Columns;
-			const float RowShift = bShortRow ? 0.5f : 0.0f;
 			for (int32 ColumnIndex = 0; ColumnIndex < CellsThisRow; ++ColumnIndex)
 			{
-				const float NormalizedX = FMath::Clamp((static_cast<float>(ColumnIndex) + RowShift) / static_cast<float>(Columns - 1), 0.0f, 1.0f);
-				const float NormalizedY = FMath::Clamp(static_cast<float>(RowIndex) / static_cast<float>(Rows - 1), 0.0f, 1.0f);
-				Result.Add(FIntPoint(EncodePhotoCoord(NormalizedX), EncodePhotoCoord(NormalizedY)));
+				Result.Add(FIntPoint(EncodePhotoColumn(ColumnIndex), EncodePhotoRow(RowIndex)));
 			}
 		}
 		return Result;

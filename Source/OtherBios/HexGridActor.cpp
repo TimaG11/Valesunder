@@ -40,19 +40,33 @@
 
 namespace
 {
-	constexpr int32 PhotoDeploymentCoordBase = 100000;
-	constexpr int32 PhotoDeploymentCoordScale = 10000;
+	constexpr int32 ExactPhotoCellBase = 200000;
+	constexpr int32 LegacyPhotoDeploymentCoordBase = 100000;
+	constexpr int32 LegacyPhotoDeploymentCoordScale = 10000;
 
-	bool DecodePhotoDeploymentCoord(int32 EncodedQ, int32 EncodedR, FVector2D& OutNormalized)
+	bool DecodeExactPhotoCell(int32 EncodedQ, int32 EncodedR, int32& OutColumn, int32& OutRow)
 	{
-		if (EncodedQ < PhotoDeploymentCoordBase || EncodedQ > PhotoDeploymentCoordBase + PhotoDeploymentCoordScale ||
-			EncodedR < PhotoDeploymentCoordBase || EncodedR > PhotoDeploymentCoordBase + PhotoDeploymentCoordScale)
+		if (EncodedQ < ExactPhotoCellBase || EncodedQ >= ExactPhotoCellBase + 1000 ||
+			EncodedR < ExactPhotoCellBase || EncodedR >= ExactPhotoCellBase + 1000)
+		{
+			return false;
+		}
+		OutColumn = EncodedQ - ExactPhotoCellBase;
+		OutRow = EncodedR - ExactPhotoCellBase;
+		return true;
+	}
+
+	// Compatibility only for deployments saved by v4/v5. New saves never use this.
+	bool DecodeLegacyPhotoDeploymentCoord(int32 EncodedQ, int32 EncodedR, FVector2D& OutNormalized)
+	{
+		if (EncodedQ < LegacyPhotoDeploymentCoordBase || EncodedQ > LegacyPhotoDeploymentCoordBase + LegacyPhotoDeploymentCoordScale ||
+			EncodedR < LegacyPhotoDeploymentCoordBase || EncodedR > LegacyPhotoDeploymentCoordBase + LegacyPhotoDeploymentCoordScale)
 		{
 			return false;
 		}
 
-		OutNormalized.X = static_cast<float>(EncodedQ - PhotoDeploymentCoordBase) / static_cast<float>(PhotoDeploymentCoordScale);
-		OutNormalized.Y = static_cast<float>(EncodedR - PhotoDeploymentCoordBase) / static_cast<float>(PhotoDeploymentCoordScale);
+		OutNormalized.X = static_cast<float>(EncodedQ - LegacyPhotoDeploymentCoordBase) / static_cast<float>(LegacyPhotoDeploymentCoordScale);
+		OutNormalized.Y = static_cast<float>(EncodedR - LegacyPhotoDeploymentCoordBase) / static_cast<float>(LegacyPhotoDeploymentCoordScale);
 		return true;
 	}
 }
@@ -3204,10 +3218,15 @@ bool AHexGridActor::TrySpawnArmyBuilderArmies()
 
 	for (const FArmyBuilderDeploymentSlot& Slot : SavedDeploymentSlots)
 	{
-		FVector2D PhotoPosition;
-		const bool bPhotoSlot = DecodePhotoDeploymentCoord(Slot.Q, Slot.R, PhotoPosition);
-		UE_LOG(LogTemp, Warning, TEXT("Battle deployment slot: UnitIndex=%d Stored=(%d,%d) Source=%s"),
-			Slot.UnitIndex, Slot.Q, Slot.R, bPhotoSlot ? TEXT("PhotoGrid") : TEXT("LegacyAxial"));
+		int32 PhotoColumn = INDEX_NONE;
+		int32 PhotoRow = INDEX_NONE;
+		FVector2D LegacyPhotoPosition;
+		const bool bExactPhotoSlot = DecodeExactPhotoCell(Slot.Q, Slot.R, PhotoColumn, PhotoRow);
+		const bool bLegacyPhotoSlot = !bExactPhotoSlot && DecodeLegacyPhotoDeploymentCoord(Slot.Q, Slot.R, LegacyPhotoPosition);
+		UE_LOG(LogTemp, Warning, TEXT("Battle deployment slot: UnitIndex=%d Stored=(%d,%d) Source=%s PhotoCell=(%d,%d)"),
+			Slot.UnitIndex, Slot.Q, Slot.R,
+			bExactPhotoSlot ? TEXT("ExactPhotoCell") : (bLegacyPhotoSlot ? TEXT("LegacyPhotoNormalized") : TEXT("LegacyAxial")),
+			PhotoColumn, PhotoRow);
 	}
 	if (SavedDeploymentSlots.Num() == PlayerArmyClasses.Num())
 	{
@@ -3218,22 +3237,67 @@ bool AHexGridActor::TrySpawnArmyBuilderArmies()
 		TSet<FIntPoint> UsedCoords;
 		bool bCustomDeploymentValid = true;
 
-		// The menu photo stores NORMALIZED photo positions in encoded Q/R values.
-		// Resolve each position against the cells that actually exist on THIS battle map.
-		// This removes the old dependency on the legacy preview-grid Q/R coordinates.
+		// v6 exact mapping: build discrete visual rows from the REAL battle cells once,
+		// then address them by the same (photo row, photo column) selected in the menu.
+		// There is no nearest-cell search for v6 saves. This preserves formation topology.
+		struct FVisualBattleCell
+		{
+			FIntPoint Coord = FIntPoint::ZeroValue;
+			FVector Local = FVector::ZeroVector;
+		};
+
+		TArray<FVisualBattleCell> SortedCells;
+		SortedCells.Reserve(Cells.Num());
+		for (const FHexCell& Cell : Cells)
+		{
+			FVisualBattleCell& VisualCell = SortedCells.AddDefaulted_GetRef();
+			VisualCell.Coord = FIntPoint(Cell.Q, Cell.R);
+			VisualCell.Local = AxialToLocal(Cell.Q, Cell.R);
+		}
+
+		SortedCells.Sort([](const FVisualBattleCell& A, const FVisualBattleCell& B)
+		{
+			if (!FMath::IsNearlyEqual(A.Local.Y, B.Local.Y, 0.1f))
+			{
+				return A.Local.Y < B.Local.Y; // top/far -> bottom/near
+			}
+			return A.Local.X < B.Local.X;
+		});
+
+		TArray<TArray<FVisualBattleCell>> VisualRows;
+		for (const FVisualBattleCell& Cell : SortedCells)
+		{
+			if (VisualRows.IsEmpty() || !FMath::IsNearlyEqual(VisualRows.Last()[0].Local.Y, Cell.Local.Y, 0.1f))
+			{
+				VisualRows.AddDefaulted();
+			}
+			VisualRows.Last().Add(Cell);
+		}
+		for (TArray<FVisualBattleCell>& Row : VisualRows)
+		{
+			Row.Sort([](const FVisualBattleCell& A, const FVisualBattleCell& B)
+			{
+				return A.Local.X < B.Local.X;
+			});
+		}
+
+		constexpr int32 PhotoRows = 11;
+		constexpr int32 PhotoColumns = 14;
+		UE_LOG(LogTemp, Warning, TEXT("Exact deployment topology: PhotoRows=%d BattleVisualRows=%d GridCells=%d"),
+			PhotoRows, VisualRows.Num(), Cells.Num());
+
+		// Legacy normalized saves still need bounds for one-time compatibility.
 		float MinLocalX = TNumericLimits<float>::Max();
 		float MaxLocalX = -TNumericLimits<float>::Max();
 		float MinLocalY = TNumericLimits<float>::Max();
 		float MaxLocalY = -TNumericLimits<float>::Max();
-		for (const FHexCell& Cell : Cells)
+		for (const FVisualBattleCell& Cell : SortedCells)
 		{
-			const FVector Local = AxialToLocal(Cell.Q, Cell.R);
-			MinLocalX = FMath::Min(MinLocalX, Local.X);
-			MaxLocalX = FMath::Max(MaxLocalX, Local.X);
-			MinLocalY = FMath::Min(MinLocalY, Local.Y);
-			MaxLocalY = FMath::Max(MaxLocalY, Local.Y);
+			MinLocalX = FMath::Min(MinLocalX, Cell.Local.X);
+			MaxLocalX = FMath::Max(MaxLocalX, Cell.Local.X);
+			MinLocalY = FMath::Min(MinLocalY, Cell.Local.Y);
+			MaxLocalY = FMath::Max(MaxLocalY, Cell.Local.Y);
 		}
-
 		const float LocalWidth = FMath::Max(1.0f, MaxLocalX - MinLocalX);
 		const float LocalHeight = FMath::Max(1.0f, MaxLocalY - MinLocalY);
 
@@ -3246,35 +3310,72 @@ bool AHexGridActor::TrySpawnArmyBuilderArmies()
 			}
 
 			FIntPoint ResolvedCoord(Slot.Q, Slot.R);
-			FVector2D PhotoNormalized;
-			if (DecodePhotoDeploymentCoord(Slot.Q, Slot.R, PhotoNormalized))
+			int32 PhotoColumn = INDEX_NONE;
+			int32 PhotoRow = INDEX_NONE;
+			FVector2D LegacyPhotoNormalized;
+
+			if (DecodeExactPhotoCell(Slot.Q, Slot.R, PhotoColumn, PhotoRow))
 			{
+				if (VisualRows.IsEmpty() || PhotoRow < 0 || PhotoRow >= PhotoRows || PhotoColumn < 0)
+				{
+					bCustomDeploymentValid = false;
+					break;
+				}
+
+				// If a map uses the same 11-row topology this is literally row-for-row.
+				// For a different map shape, keep the semantic vertical rank deterministic.
+				const int32 BattleRowIndex = VisualRows.Num() == PhotoRows
+					? PhotoRow
+					: FMath::Clamp(FMath::RoundToInt(static_cast<float>(PhotoRow) * static_cast<float>(VisualRows.Num() - 1) / static_cast<float>(PhotoRows - 1)), 0, VisualRows.Num() - 1);
+
+				const TArray<FVisualBattleCell>& BattleRow = VisualRows[BattleRowIndex];
+				const bool bPhotoShortRow = (PhotoRow % 2) == 0;
+				const int32 PhotoCellsThisRow = bPhotoShortRow ? PhotoColumns - 1 : PhotoColumns;
+				if (BattleRow.IsEmpty() || PhotoColumn >= PhotoCellsThisRow)
+				{
+					bCustomDeploymentValid = false;
+					break;
+				}
+
+				const int32 BattleColumnIndex = BattleRow.Num() == PhotoCellsThisRow
+					? PhotoColumn
+					: FMath::Clamp(FMath::RoundToInt(static_cast<float>(PhotoColumn) * static_cast<float>(BattleRow.Num() - 1) / static_cast<float>(FMath::Max(1, PhotoCellsThisRow - 1))), 0, BattleRow.Num() - 1);
+
+				ResolvedCoord = BattleRow[BattleColumnIndex].Coord;
+				if (UsedCoords.Contains(ResolvedCoord))
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Exact photo mapping collision: Photo=(%d,%d) -> Grid=(%d,%d)."),
+						PhotoColumn, PhotoRow, ResolvedCoord.X, ResolvedCoord.Y);
+					bCustomDeploymentValid = false;
+					break;
+				}
+
+				UE_LOG(LogTemp, Warning, TEXT("Exact photo cell mapped: UnitIndex=%d Photo=(col %d,row %d) -> Battle=(row %d,col %d) -> Grid=(%d,%d)"),
+					Slot.UnitIndex, PhotoColumn, PhotoRow, BattleRowIndex, BattleColumnIndex, ResolvedCoord.X, ResolvedCoord.Y);
+			}
+			else if (DecodeLegacyPhotoDeploymentCoord(Slot.Q, Slot.R, LegacyPhotoNormalized))
+			{
+				// One-time compatibility for v4/v5 saves. Save a formation again in v6 to remove this path.
 				float BestScore = TNumericLimits<float>::Max();
 				bool bFoundCell = false;
-				for (const FHexCell& Cell : Cells)
+				for (const FVisualBattleCell& Cell : SortedCells)
 				{
-					const FIntPoint Candidate(Cell.Q, Cell.R);
-					if (UsedCoords.Contains(Candidate))
+					if (UsedCoords.Contains(Cell.Coord))
 					{
 						continue;
 					}
-
-					const FVector Local = AxialToLocal(Cell.Q, Cell.R);
-					const float NX = FMath::Clamp((Local.X - MinLocalX) / LocalWidth, 0.0f, 1.0f);
-					// Photo Y grows downward. On the battle maps larger Local.Y is the side closer to the camera,
-					// so bottom of the deployment photo must resolve to larger Local.Y.
-					const float NY = FMath::Clamp((Local.Y - MinLocalY) / LocalHeight, 0.0f, 1.0f);
-					const float DX = NX - PhotoNormalized.X;
-					const float DY = NY - PhotoNormalized.Y;
+					const float NX = FMath::Clamp((Cell.Local.X - MinLocalX) / LocalWidth, 0.0f, 1.0f);
+					const float NY = FMath::Clamp((Cell.Local.Y - MinLocalY) / LocalHeight, 0.0f, 1.0f);
+					const float DX = NX - LegacyPhotoNormalized.X;
+					const float DY = NY - LegacyPhotoNormalized.Y;
 					const float Score = DX * DX + DY * DY;
 					if (!bFoundCell || Score < BestScore)
 					{
 						BestScore = Score;
-						ResolvedCoord = Candidate;
+						ResolvedCoord = Cell.Coord;
 						bFoundCell = true;
 					}
 				}
-
 				if (!bFoundCell)
 				{
 					bCustomDeploymentValid = false;
@@ -3290,15 +3391,12 @@ bool AHexGridActor::TrySpawnArmyBuilderArmies()
 			CustomPlayerSpawnCoords[Slot.UnitIndex] = FHexCoord(ResolvedCoord.X, ResolvedCoord.Y);
 			UsedUnitIndexes.Add(Slot.UnitIndex);
 			UsedCoords.Add(ResolvedCoord);
-
-			UE_LOG(LogTemp, Warning, TEXT("Photo deployment resolved: UnitIndex=%d Encoded=(%d,%d) -> Grid=(%d,%d)"),
-				Slot.UnitIndex, Slot.Q, Slot.R, ResolvedCoord.X, ResolvedCoord.Y);
 		}
 
 		if (bCustomDeploymentValid && UsedUnitIndexes.Num() == PlayerArmyClasses.Num())
 		{
 			PlayerSpawnCoords = CustomPlayerSpawnCoords;
-			UE_LOG(LogTemp, Log, TEXT("Army Builder: using photo-driven player deployment."));
+			UE_LOG(LogTemp, Log, TEXT("Army Builder: using v6 exact photo-cell player deployment."));
 		}
 		else
 		{
