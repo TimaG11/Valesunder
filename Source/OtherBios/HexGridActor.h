@@ -590,6 +590,47 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "0.0"))
 	float EnemyBotAssistAllyScore = 260.0f;
 
+	// PRE-EMPTIVE REINFORCEMENT:
+	// Number of future combat turns used when deciding whether a frontline ally can handle
+	// the local fight. The forecast uses MaxHealth, so it can request help BEFORE the ally
+	// has already lost half of its HP.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Reinforcement", meta = (ClampMin = "1", ClampMax = "4"))
+	int32 EnemyBotReinforcementPredictionTurns = 2;
+
+	// A support request is considered when projected incoming damage over the forecast horizon
+	// reaches this share of the ally's FULL MaxHealth.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Reinforcement", meta = (ClampMin = "0.20", ClampMax = "2.00"))
+	float EnemyBotReinforcementFullHealthDangerRatio = 0.70f;
+
+	// If projected enemy damage per turn is this many times larger than the damage already
+	// contributed by the local defenders, the bot asks for reinforcements early.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Reinforcement", meta = (ClampMin = "0.50", ClampMax = "3.00"))
+	float EnemyBotReinforcementPowerDisadvantageRatio = 1.10f;
+
+	// A unit inside this radius of the pressured ally is treated as already being part of
+	// that local engagement when it can currently attack one of the threatening player units.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Reinforcement", meta = (ClampMin = "1", ClampMax = "6"))
+	int32 EnemyBotReinforcementLocalSupportRange = 3;
+
+	// Once a free helper reaches this distance from the pressured ally, it is considered to
+	// have arrived at the engagement and the need calculation is re-run before pulling more units.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Reinforcement", meta = (ClampMin = "1", ClampMax = "6"))
+	int32 EnemyBotReinforcementArrivalRange = 3;
+
+	// Weight for a player unit that cannot attack the ally now but can move + attack it next turn.
+	// This is deliberately substantial so the AI reacts before taking damage.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Reinforcement", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float EnemyBotReinforcementFutureThreatWeight = 0.72f;
+
+	// Dominant movement reward for an idle unit that closes distance to a losing engagement.
+	// This is intentionally much larger than ordinary formation/advance scores.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Reinforcement", meta = (ClampMin = "0.0"))
+	float EnemyBotPreemptiveReinforcementMoveScore = 1800.0f;
+
+	// Additional reward after a helper reaches the local engagement radius.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Reinforcement", meta = (ClampMin = "0.0"))
+	float EnemyBotPreemptiveReinforcementArrivalScore = 2600.0f;
+
 	// Bonus for moves/attacks that keep following the current multi-turn focus target.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "0.0"))
 	float EnemyBotPlanCommitmentScore = 220.0f;
@@ -602,6 +643,41 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics")
 	float EnemyBotPointlessMoveScoreThreshold = 180.0f;
 
+	// Global turn planner bonus for a move that leaves enough AP to attack immediately afterwards.
+	// This is deliberately large: move -> attack must beat moving a second unrelated unit.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "0.0"))
+	float EnemyBotMoveIntoAttackBonus = 7200.0f;
+
+	// Penalizes packing several allies into adjacent hexes. Cohesion should produce a line/screen, not a blob.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "0.0"))
+	float EnemyBotAdjacentCrowdingPenalty = 520.0f;
+
+	// Small reward for healthy local spacing inside the formation.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "0.0"))
+	float EnemyBotHealthySpacingScore = 160.0f;
+
+	// Preferred distance to the nearest ally. 2 usually leaves one visible hex of breathing room.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "1", ClampMax = "4"))
+	int32 EnemyBotPreferredFormationSpacing = 2;
+
+	// A normal non-attacking move must stay connected to at least one ally inside this range.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "1", ClampMax = "6"))
+	int32 EnemyBotFormationLinkRange = 3;
+
+	// Maximum difference between the foremost and rearmost unit measured by distance to the player.
+	// This is the hard anti-"3 fight, 2 watch from spawn" rule.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 EnemyBotMaxFormationDepth = 2;
+
+	// Maximum normal pairwise army diameter. A broken formation may exceed it temporarily,
+	// but non-attacking moves are then allowed only when they reduce the diameter.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "3", ClampMax = "12"))
+	int32 EnemyBotMaxFormationDiameter = 5;
+
+	// Dominant score for reconnecting a split formation / catching up a detached subgroup.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "0.0"))
+	float EnemyBotFormationRepairScore = 950.0f;
+
 	// Support/ranged units retreat only from direct pressure, not just because a tank is fighting nearby.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "0"))
 	int32 EnemyBotSupportDirectThreatRetreatDamage = 1;
@@ -613,6 +689,25 @@ public:
 	// Reward for every hex that moves a unit closer to the player army while it is not retreating.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "0.0"))
 	float EnemyBotArmyAdvanceScore = 190.0f;
+
+	// Fast march before contact. Active only while NO enemy unit can reach any player
+	// with move + attack this turn. Once contact is possible, normal tactical AI takes over.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Approach", meta = (ClampMin = "0.0"))
+	float EnemyBotApproachAdvanceScore = 1250.0f;
+
+	// During the march, units at the rear are deliberately moved first. This prevents the
+	// front line from waiting for the back line while the back line waits for the front.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Approach", meta = (ClampMin = "0.0"))
+	float EnemyBotApproachRearPriorityScore = 1150.0f;
+
+	// Temporary extra depth/diameter allowed while the formation is translating across the map.
+	// Connectivity is still a hard rule, so this cannot recreate the old 3+2 split.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Approach", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 EnemyBotApproachFormationSlack = 2;
+
+	// Strong penalty for sideways/non-advancing movement during the pre-contact march.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Approach", meta = (ClampMin = "0.0"))
+	float EnemyBotApproachNoProgressPenalty = 1800.0f;
 
 	// Extra reward for a unit that is behind the common battle line and catches up.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Group Tactics", meta = (ClampMin = "0.0"))
@@ -1989,14 +2084,19 @@ private:
 	int32 GetEnemyAllyCountNearCell(const FIntPoint& CellCoord, int32 Range, AHexUnitActor* IgnoreUnit = nullptr) const;
 	int32 GetPlayerUnitCountNearCell(const FIntPoint& CellCoord, int32 Range) const;
 	AHexUnitActor* FindMostThreatenedEnemyAlly(AHexUnitActor* ActingUnit, int32* OutThreatDamage = nullptr) const;
+	bool HasEnemyBotCurrentAttackTarget(AHexUnitActor* EnemyUnit) const;
+	float ScoreEnemyBotPreemptiveSupportNeed(AHexUnitActor* Ally, int32* OutThreatCount = nullptr, int32* OutLocalDefenderCount = nullptr) const;
+	AHexUnitActor* FindEnemyBotPreemptiveSupportTarget(AHexUnitActor* ActingUnit, float* OutNeedScore = nullptr) const;
 	bool IsEnemyBotUnitDirectlyThreatened(AHexUnitActor* EnemyUnit, int32* OutThreatDamage = nullptr) const;
 	bool ShouldEnemyBotUseLastStand(AHexUnitActor* Champion) const;
 	AHexUnitActor* FindBestEnemyBotMarkedForDeathTarget(AHexUnitActor* Champion) const;
+	bool WillEnemyBotTargetTakeDamageThisOrNextTurn(AHexUnitActor* Target, AHexUnitActor* MarkingChampion) const;
 	float ScoreEnemyBotSummonCell(AHexUnitActor* Summoner, const FIntPoint& CellCoord) const;
 	bool GetUsefulEnemyBotSummonCells(AHexUnitActor* Summoner, TArray<FIntPoint>& OutCells, float* OutBestUtility = nullptr) const;
 	int32 GetEnemyBotActionCountThisTurn(AHexUnitActor* EnemyUnit) const;
 	int32 GetEnemyBotUnactedUnitCount(AHexUnitActor* IgnoreUnit = nullptr) const;
 	int32 GetEnemyBotUnactedFrontlineUnitCount(AHexUnitActor* IgnoreUnit = nullptr) const;
+	bool IsEnemyBotArmyInApproachPhase() const;
 	bool IsEnemyBotFrontlineUnit(AHexUnitActor* Unit) const;
 	int32 GetNearestPlayerDistanceForEnemyFrontline(AHexUnitActor* IgnoreUnit = nullptr) const;
 	bool IsEnemyBotBacklineScreenedAtCell(AHexUnitActor* EnemyUnit, const FIntPoint& CandidateCoord) const;

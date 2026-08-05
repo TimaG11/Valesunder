@@ -1329,6 +1329,313 @@ int32 AHexGridActor::GetPlayerUnitCountNearCell(const FIntPoint& CellCoord, int3
 	return Count;
 }
 
+bool AHexGridActor::HasEnemyBotCurrentAttackTarget(AHexUnitActor* EnemyUnit) const
+{
+	if (!IsValid(EnemyUnit) || EnemyUnit->GetIsDead() || EnemyUnit->Team != EHexUnitTeam::Enemy)
+	{
+		return false;
+	}
+
+	const FIntPoint EnemyCoord = EnemyUnit->GetGridCoord();
+	const int32 AttackRange = FMath::Max(1, EnemyUnit->AttackRange);
+
+	for (const TPair<FIntPoint, AHexUnitActor*>& Pair : UnitsByCoord)
+	{
+		AHexUnitActor* PlayerUnit = Pair.Value;
+		if (!IsValid(PlayerUnit) || PlayerUnit->GetIsDead() || PlayerUnit->Team != EHexUnitTeam::Player)
+		{
+			continue;
+		}
+
+		const FIntPoint PlayerCoord = PlayerUnit->GetGridCoord();
+		const int32 Distance = GetHexDistance(
+			EnemyCoord.X, EnemyCoord.Y,
+			PlayerCoord.X, PlayerCoord.Y
+		);
+
+		if (Distance > 0 && Distance <= AttackRange)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+float AHexGridActor::ScoreEnemyBotPreemptiveSupportNeed(
+	AHexUnitActor* Ally,
+	int32* OutThreatCount,
+	int32* OutLocalDefenderCount
+) const
+{
+	if (OutThreatCount)
+	{
+		*OutThreatCount = 0;
+	}
+	if (OutLocalDefenderCount)
+	{
+		*OutLocalDefenderCount = 0;
+	}
+
+	if (!IsValid(Ally) || Ally->GetIsDead() || Ally->Team != EHexUnitTeam::Enemy)
+	{
+		return 0.0f;
+	}
+
+	const FIntPoint AllyCoord = Ally->GetGridCoord();
+
+	struct FPredictedThreat
+	{
+		AHexUnitActor* Unit = nullptr;
+		float ReachWeight = 0.0f;
+		int32 Distance = MAX_int32;
+	};
+
+	TArray<FPredictedThreat> Threats;
+	float PredictedIncomingPerTurn = 0.0f;
+	float ThreatHealthPool = 0.0f;
+
+	// IMPORTANT: this forecast does not wait for Ally->CurrentHealth to become low.
+	// It asks: "If this fight starts now and the ally were still at full HP, does the
+	// current local matchup look losing over the next few turns?"
+	for (const TPair<FIntPoint, AHexUnitActor*>& Pair : UnitsByCoord)
+	{
+		AHexUnitActor* PlayerUnit = Pair.Value;
+		if (!IsValid(PlayerUnit) || PlayerUnit->GetIsDead() || PlayerUnit->Team != EHexUnitTeam::Player)
+		{
+			continue;
+		}
+
+		const FIntPoint PlayerCoord = PlayerUnit->GetGridCoord();
+		const int32 Distance = GetHexDistance(
+			PlayerCoord.X, PlayerCoord.Y,
+			AllyCoord.X, AllyCoord.Y
+		);
+
+		if (Distance <= 0)
+		{
+			continue;
+		}
+
+		const int32 ImmediateReach = FMath::Max(1, PlayerUnit->AttackRange);
+		const int32 NextTurnReach =
+			FMath::Max(0, PlayerUnit->MovementRange) +
+			FMath::Max(1, PlayerUnit->AttackRange);
+
+		if (Distance > NextTurnReach)
+		{
+			continue;
+		}
+
+		const float ReachWeight = Distance <= ImmediateReach
+			? 1.0f
+			: FMath::Clamp(EnemyBotReinforcementFutureThreatWeight, 0.0f, 1.0f);
+
+		FPredictedThreat Threat;
+		Threat.Unit = PlayerUnit;
+		Threat.ReachWeight = ReachWeight;
+		Threat.Distance = Distance;
+		Threats.Add(Threat);
+
+		PredictedIncomingPerTurn +=
+			static_cast<float>(Ally->GetModifiedIncomingDamage(FMath::Max(0, PlayerUnit->AttackDamage))) *
+			ReachWeight;
+
+		ThreatHealthPool += static_cast<float>(FMath::Max(1, PlayerUnit->CurrentHealth));
+	}
+
+	if (Threats.IsEmpty() || PredictedIncomingPerTurn <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	// Local friendly damage includes the pressured ally and ONLY allies that are already
+	// meaningfully contributing to this exact engagement. Idle units merely standing somewhere
+	// nearby are intentionally not counted as "help" until they can actually attack a threat.
+	float LocalFriendlyDamagePerTurn = static_cast<float>(FMath::Max(1, Ally->AttackDamage));
+	int32 LocalDefenderCount = 1;
+
+	for (const TPair<FIntPoint, AHexUnitActor*>& Pair : UnitsByCoord)
+	{
+		AHexUnitActor* Defender = Pair.Value;
+		if (!IsValid(Defender) || Defender == Ally || Defender->GetIsDead() || Defender->Team != EHexUnitTeam::Enemy)
+		{
+			continue;
+		}
+
+		const FIntPoint DefenderCoord = Defender->GetGridCoord();
+		const int32 DistanceToAlly = GetHexDistance(
+			DefenderCoord.X, DefenderCoord.Y,
+			AllyCoord.X, AllyCoord.Y
+		);
+
+		if (DistanceToAlly > FMath::Max(1, EnemyBotReinforcementLocalSupportRange))
+		{
+			continue;
+		}
+
+		bool bCurrentlyContributes = false;
+		for (const FPredictedThreat& Threat : Threats)
+		{
+			if (!IsValid(Threat.Unit))
+			{
+				continue;
+			}
+
+			const FIntPoint ThreatCoord = Threat.Unit->GetGridCoord();
+			const int32 DistanceToThreat = GetHexDistance(
+				DefenderCoord.X, DefenderCoord.Y,
+				ThreatCoord.X, ThreatCoord.Y
+			);
+
+			if (DistanceToThreat > 0 && DistanceToThreat <= FMath::Max(1, Defender->AttackRange))
+			{
+				bCurrentlyContributes = true;
+				break;
+			}
+		}
+
+		if (!bCurrentlyContributes)
+		{
+			continue;
+		}
+
+		++LocalDefenderCount;
+		LocalFriendlyDamagePerTurn += static_cast<float>(FMath::Max(1, Defender->AttackDamage));
+	}
+
+	const int32 PredictionTurns = FMath::Clamp(EnemyBotReinforcementPredictionTurns, 1, 4);
+	const float FullHealth = static_cast<float>(FMath::Max(1, Ally->MaxHealth));
+	const float ProjectedIncoming = PredictedIncomingPerTurn * static_cast<float>(PredictionTurns);
+	const float FullHealthPressure = ProjectedIncoming / FullHealth;
+
+	const float SafeFriendlyDamage = FMath::Max(1.0f, LocalFriendlyDamagePerTurn);
+	const float PowerDisadvantage = PredictedIncomingPerTurn / SafeFriendlyDamage;
+
+	// Combat-race estimate:
+	// - survival time intentionally uses MaxHealth, not CurrentHealth;
+	// - clear time uses the current threat HP pool because wounded enemies really are easier to finish.
+	const float FullHealthSurvivalTurns = FullHealth / FMath::Max(1.0f, PredictedIncomingPerTurn);
+	const float ThreatClearTurns = ThreatHealthPool / SafeFriendlyDamage;
+
+	const bool bHeavyFullHealthPressure =
+		FullHealthPressure >= FMath::Max(0.20f, EnemyBotReinforcementFullHealthDangerRatio);
+
+	const bool bPowerDisadvantage =
+		PowerDisadvantage >= FMath::Max(0.50f, EnemyBotReinforcementPowerDisadvantageRatio);
+
+	const bool bLosesDamageRace =
+		FullHealthSurvivalTurns <= ThreatClearTurns * 1.10f;
+
+	const bool bLocallyOutnumbered =
+		Threats.Num() > LocalDefenderCount &&
+		PowerDisadvantage >= 0.85f;
+
+	if (!bHeavyFullHealthPressure && !bPowerDisadvantage && !bLosesDamageRace && !bLocallyOutnumbered)
+	{
+		return 0.0f;
+	}
+
+	if (OutThreatCount)
+	{
+		*OutThreatCount = Threats.Num();
+	}
+	if (OutLocalDefenderCount)
+	{
+		*OutLocalDefenderCount = LocalDefenderCount;
+	}
+
+	float NeedScore = 900.0f;
+	NeedScore += FullHealthPressure * 1500.0f;
+	NeedScore += FMath::Max(0.0f, PowerDisadvantage - 0.75f) * 1300.0f;
+	NeedScore += static_cast<float>(FMath::Max(0, Threats.Num() - LocalDefenderCount)) * 520.0f;
+
+	if (bLosesDamageRace)
+	{
+		const float RaceGap = FMath::Max(0.0f, ThreatClearTurns - FullHealthSurvivalTurns);
+		NeedScore += 850.0f + RaceGap * 180.0f;
+	}
+
+	// Existing damage increases urgency, but it is NEVER required to trigger the request.
+	// This keeps the behavior proactive instead of waiting until "half his face is gone".
+	const float CurrentHealthPercent = Ally->MaxHealth > 0
+		? static_cast<float>(Ally->CurrentHealth) / static_cast<float>(Ally->MaxHealth)
+		: 1.0f;
+	NeedScore += (1.0f - FMath::Clamp(CurrentHealthPercent, 0.0f, 1.0f)) * 420.0f;
+
+	if (Ally->UnitType == EHexUnitType::Champion)
+	{
+		NeedScore += 220.0f;
+	}
+	else if (Ally->UnitType == EHexUnitType::Ram)
+	{
+		NeedScore += 120.0f;
+	}
+
+	if (Ally->bIsSummonedUnit)
+	{
+		NeedScore *= 0.55f;
+	}
+
+	return NeedScore;
+}
+
+AHexUnitActor* AHexGridActor::FindEnemyBotPreemptiveSupportTarget(
+	AHexUnitActor* ActingUnit,
+	float* OutNeedScore
+) const
+{
+	if (OutNeedScore)
+	{
+		*OutNeedScore = 0.0f;
+	}
+
+	if (!IsValid(ActingUnit) || ActingUnit->GetIsDead() || ActingUnit->Team != EHexUnitTeam::Enemy)
+	{
+		return nullptr;
+	}
+
+	AHexUnitActor* BestTarget = nullptr;
+	float BestScore = 0.0f;
+	const FIntPoint ActingCoord = ActingUnit->GetGridCoord();
+
+	for (const TPair<FIntPoint, AHexUnitActor*>& Pair : UnitsByCoord)
+	{
+		AHexUnitActor* Ally = Pair.Value;
+		if (!IsValid(Ally) || Ally == ActingUnit || Ally->GetIsDead() || Ally->Team != EHexUnitTeam::Enemy)
+		{
+			continue;
+		}
+
+		const float NeedScore = ScoreEnemyBotPreemptiveSupportNeed(Ally, nullptr, nullptr);
+		if (NeedScore <= 0.0f)
+		{
+			continue;
+		}
+
+		const FIntPoint AllyCoord = Ally->GetGridCoord();
+		const int32 Distance = GetHexDistance(
+			ActingCoord.X, ActingCoord.Y,
+			AllyCoord.X, AllyCoord.Y
+		);
+
+		// Prefer the most dangerous fight, with a mild bias toward helpers that can arrive sooner.
+		const float CandidateScore = NeedScore - static_cast<float>(Distance) * 55.0f;
+		if (CandidateScore > BestScore)
+		{
+			BestScore = CandidateScore;
+			BestTarget = Ally;
+		}
+	}
+
+	if (OutNeedScore && IsValid(BestTarget))
+	{
+		*OutNeedScore = ScoreEnemyBotPreemptiveSupportNeed(BestTarget, nullptr, nullptr);
+	}
+
+	return BestTarget;
+}
+
 AHexUnitActor* AHexGridActor::FindMostThreatenedEnemyAlly(AHexUnitActor* ActingUnit, int32* OutThreatDamage) const
 {
 	if (OutThreatDamage)
@@ -1486,6 +1793,74 @@ bool AHexGridActor::ShouldEnemyBotUseLastStand(AHexUnitActor* Champion) const
 	return FutureDamage >= Champion->CurrentHealth + FutureSafetyDamage;
 }
 
+bool AHexGridActor::WillEnemyBotTargetTakeDamageThisOrNextTurn(
+	AHexUnitActor* Target,
+	AHexUnitActor* MarkingChampion
+) const
+{
+	if (!IsValid(Target) || Target->GetIsDead() || Target->Team != EHexUnitTeam::Player)
+	{
+		return false;
+	}
+
+	const FIntPoint TargetCoord = Target->GetGridCoord();
+	const int32 AttackCost = FMath::Max(0, CalculateAttackActionPointCost());
+
+	// Marked for Death is applied before the follow-up attack, so reserve its AP cost
+	// when checking whether damage can still happen THIS enemy turn.
+	const int32 AbilityCost = IsValid(MarkingChampion)
+		? FMath::Max(0, CalculateChampionAbilityActionPointCost(MarkingChampion))
+		: 0;
+	const int32 APAfterMark = FMath::Max(0, CurrentActionPoints - AbilityCost);
+
+	for (const TPair<FIntPoint, AHexUnitActor*>& Pair : UnitsByCoord)
+	{
+		AHexUnitActor* Attacker = Pair.Value;
+		if (!IsValid(Attacker) || Attacker->GetIsDead() || Attacker->Team != EHexUnitTeam::Enemy)
+		{
+			continue;
+		}
+
+		const FIntPoint AttackerCoord = Attacker->GetGridCoord();
+		const int32 Distance = GetHexDistance(
+			AttackerCoord.X, AttackerCoord.Y,
+			TargetCoord.X, TargetCoord.Y
+		);
+		if (Distance <= 0)
+		{
+			continue;
+		}
+
+		const int32 AttackRange = FMath::Max(1, Attacker->AttackRange);
+
+		// THIS TURN:
+		// There must still be AP after the mark and the attacker must not have already
+		// spent its one normal attack for this turn.
+		if (Distance <= AttackRange &&
+			CanUnitAttackThisTurn(Attacker) &&
+			APAfterMark >= AttackCost)
+		{
+			return true;
+		}
+
+		// NEXT ENEMY TURN:
+		// Require a realistic move + attack package from a fresh AP pool.
+		// The attacker has to be able to close the missing distance within MovementRange,
+		// and that movement plus one attack must fit into MaxActionPoints.
+		const int32 RequiredMoveHexes = FMath::Max(0, Distance - AttackRange);
+		if (RequiredMoveHexes <= FMath::Max(0, Attacker->MovementRange))
+		{
+			const int32 RequiredMoveAP = CalculateMoveActionPointCost(RequiredMoveHexes);
+			if (RequiredMoveAP + AttackCost <= FMath::Max(0, MaxActionPoints))
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 AHexUnitActor* AHexGridActor::FindBestEnemyBotMarkedForDeathTarget(AHexUnitActor* Champion) const
 {
 	if (!IsValid(Champion) || Champion->GetIsDead() || Champion->Team != EHexUnitTeam::Enemy || !Champion->IsChampionAbilityMarkedForDeath())
@@ -1509,6 +1884,14 @@ AHexUnitActor* AHexGridActor::FindBestEnemyBotMarkedForDeathTarget(AHexUnitActor
 		const FIntPoint TargetCoord = Target->GetGridCoord();
 		const int32 Distance = GetHexDistance(ChampionCoord.X, ChampionCoord.Y, TargetCoord.X, TargetCoord.Y);
 		if (Distance <= 0 || Distance > AbilityRange)
+		{
+			continue;
+		}
+
+		// Ringleader/Marked for Death must create value immediately.
+		// Do not spend the ability if nobody can damage this target during the
+		// current enemy turn after paying the ability AP, or during the next enemy turn.
+		if (!WillEnemyBotTargetTakeDamageThisOrNextTurn(Target, Champion))
 		{
 			continue;
 		}
@@ -1818,6 +2201,54 @@ int32 AHexGridActor::GetEnemyBotUnactedFrontlineUnitCount(AHexUnitActor* IgnoreU
 	return Count;
 }
 
+bool AHexGridActor::IsEnemyBotArmyInApproachPhase() const
+{
+	bool bHasEnemy = false;
+	bool bHasPlayer = false;
+
+	for (const TPair<FIntPoint, AHexUnitActor*>& EnemyPair : UnitsByCoord)
+	{
+		AHexUnitActor* EnemyUnit = EnemyPair.Value;
+		if (!IsValid(EnemyUnit) || EnemyUnit->GetIsDead() || EnemyUnit->Team != EHexUnitTeam::Enemy)
+		{
+			continue;
+		}
+
+		bHasEnemy = true;
+
+		const FIntPoint EnemyCoord = EnemyUnit->GetGridCoord();
+		const int32 ReachThisTurn =
+			FMath::Max(0, GetEffectiveMovementRangeForUnit(EnemyUnit)) +
+			FMath::Max(1, EnemyUnit->AttackRange);
+
+		for (const TPair<FIntPoint, AHexUnitActor*>& PlayerPair : UnitsByCoord)
+		{
+			AHexUnitActor* PlayerUnit = PlayerPair.Value;
+			if (!IsValid(PlayerUnit) || PlayerUnit->GetIsDead() || PlayerUnit->Team != EHexUnitTeam::Player)
+			{
+				continue;
+			}
+
+			bHasPlayer = true;
+
+			const FIntPoint PlayerCoord = PlayerUnit->GetGridCoord();
+			const int32 Distance = GetHexDistance(
+				EnemyCoord.X, EnemyCoord.Y,
+				PlayerCoord.X, PlayerCoord.Y
+			);
+
+			// As soon as one enemy can realistically enter attack range this turn,
+			// stop marching and hand control back to the normal tactical planner.
+			if (Distance > 0 && Distance <= ReachThisTurn)
+			{
+				return false;
+			}
+		}
+	}
+
+	return bHasEnemy && bHasPlayer;
+}
+
 bool AHexGridActor::IsEnemyBotFrontlineUnit(AHexUnitActor* Unit) const
 {
 	if (!IsValid(Unit) || Unit->GetIsDead() || Unit->Team != EHexUnitTeam::Enemy)
@@ -1939,20 +2370,73 @@ float AHexGridActor::ScoreEnemyBotGroupTactics(AHexUnitActor* EnemyUnit, const F
 	float Score = 0.0f;
 	const FIntPoint CurrentCoord = EnemyUnit->GetGridCoord();
 	const int32 AliveEnemyCount = GetAliveUnitCountForTeam(EHexUnitTeam::Enemy);
+	const bool bApproachPhase = IsEnemyBotArmyInApproachPhase();
 
+	const int32 AdjacentAllies = GetEnemyAllyCountNearCell(CandidateCoord, 1, EnemyUnit);
 	const int32 NearbyAllies = GetEnemyAllyCountNearCell(CandidateCoord, 2, EnemyUnit);
-	Score += static_cast<float>(NearbyAllies) * EnemyBotFormationCohesionScore;
 
-	if (AliveEnemyCount > 1 && NearbyAllies <= 0 && !bCanAttackFromCandidate)
+	int32 NearestAllyDistance = MAX_int32;
+	int32 FurthestAllyDistance = 0;
+	int32 CurrentNearestAllyDistance = MAX_int32;
+	int32 CurrentFurthestAllyDistance = 0;
+	for (const TPair<FIntPoint, AHexUnitActor*>& Pair : UnitsByCoord)
 	{
-		Score -= EnemyBotFormationCohesionScore * 1.75f;
+		AHexUnitActor* Ally = Pair.Value;
+		if (!IsValid(Ally) || Ally == EnemyUnit || Ally->GetIsDead() || Ally->Team != EHexUnitTeam::Enemy)
+		{
+			continue;
+		}
+
+		const FIntPoint AllyCoord = Ally->GetGridCoord();
+		const int32 CandidateDistance = GetHexDistance(CandidateCoord.X, CandidateCoord.Y, AllyCoord.X, AllyCoord.Y);
+		const int32 CurrentDistance = GetHexDistance(CurrentCoord.X, CurrentCoord.Y, AllyCoord.X, AllyCoord.Y);
+		NearestAllyDistance = FMath::Min(NearestAllyDistance, CandidateDistance);
+		FurthestAllyDistance = FMath::Max(FurthestAllyDistance, CandidateDistance);
+		CurrentNearestAllyDistance = FMath::Min(CurrentNearestAllyDistance, CurrentDistance);
+		CurrentFurthestAllyDistance = FMath::Max(CurrentFurthestAllyDistance, CurrentDistance);
+	}
+
+	// Loose formation: ideal nearest ally is ~2 hexes away. This keeps one visual gap
+	// between most units while still making the army move as one connected group.
+	if (AliveEnemyCount > 1 && NearestAllyDistance != MAX_int32)
+	{
+		const int32 PreferredSpacing = FMath::Max(1, EnemyBotPreferredFormationSpacing);
+		const int32 LinkRange = FMath::Max(PreferredSpacing, EnemyBotFormationLinkRange);
+
+		Score += EnemyBotHealthySpacingScore;
+		Score -= static_cast<float>(FMath::Abs(NearestAllyDistance - PreferredSpacing)) * EnemyBotHealthySpacingScore * 0.65f;
+
+		if (AdjacentAllies >= 2)
+		{
+			Score -= static_cast<float>(AdjacentAllies - 1) * EnemyBotAdjacentCrowdingPenalty;
+		}
+		else if (AdjacentAllies == 1 && PreferredSpacing >= 2)
+		{
+			Score -= EnemyBotAdjacentCrowdingPenalty * 0.16f;
+		}
+
+		if (NearestAllyDistance > LinkRange && !bCanAttackFromCandidate && !bCanHealFromCandidate)
+		{
+			Score -= static_cast<float>(NearestAllyDistance - LinkRange) * EnemyBotFormationRepairScore;
+		}
+
+		// When the army is already split, strongly reward moves that reconnect the pieces.
+		if (CurrentNearestAllyDistance != MAX_int32 && NearestAllyDistance < CurrentNearestAllyDistance)
+		{
+			Score += static_cast<float>(CurrentNearestAllyDistance - NearestAllyDistance) * EnemyBotFormationRepairScore;
+		}
+
+		if (CurrentFurthestAllyDistance > EnemyBotMaxFormationDiameter && FurthestAllyDistance < CurrentFurthestAllyDistance)
+		{
+			Score += static_cast<float>(CurrentFurthestAllyDistance - FurthestAllyDistance) * EnemyBotFormationRepairScore * 0.70f;
+		}
 	}
 
 	const FIntPoint EnemyCenter = GetArmyCenterCell(EHexUnitTeam::Enemy);
 	const int32 CandidateDistanceToEnemyCenter = GetHexDistance(CandidateCoord.X, CandidateCoord.Y, EnemyCenter.X, EnemyCenter.Y);
-	if (CandidateDistanceToEnemyCenter > 4 && !bCanAttackFromCandidate)
+	if (CandidateDistanceToEnemyCenter > FMath::Max(3, EnemyBotMaxFormationDiameter / 2 + 1) && !bCanAttackFromCandidate)
 	{
-		Score -= static_cast<float>(CandidateDistanceToEnemyCenter - 4) * EnemyBotFrontlineSpreadPenalty;
+		Score -= static_cast<float>(CandidateDistanceToEnemyCenter - (EnemyBotMaxFormationDiameter / 2 + 1)) * EnemyBotFrontlineSpreadPenalty;
 	}
 
 	const int32 CurrentNearestPlayerDistance = GetNearestPlayerDistanceFromCell(CurrentCoord);
@@ -1966,10 +2450,27 @@ float AHexGridActor::ScoreEnemyBotGroupTactics(AHexUnitActor* EnemyUnit, const F
 		if (AdvanceSteps > 0)
 		{
 			Score += static_cast<float>(AdvanceSteps) * EnemyBotArmyAdvanceScore;
+
+			// Before contact, covering ground is the primary objective. This is deliberately
+			// much stronger than spacing/lookahead preferences so the army does not spend
+			// five turns making tiny cosmetic adjustments on its own half of the map.
+			if (bApproachPhase)
+			{
+				Score += static_cast<float>(AdvanceSteps) * EnemyBotApproachAdvanceScore;
+			}
 		}
 		else if (AdvanceSteps < 0 && !bMeaningfulRetreat)
 		{
 			Score -= static_cast<float>(-AdvanceSteps) * EnemyBotBackwardMovePenalty;
+
+			if (bApproachPhase)
+			{
+				Score -= static_cast<float>(-AdvanceSteps) * EnemyBotApproachNoProgressPenalty;
+			}
+		}
+		else if (bApproachPhase && AdvanceSteps == 0 && !bCanAttackFromCandidate && !bCanHealFromCandidate)
+		{
+			Score -= EnemyBotApproachNoProgressPenalty;
 		}
 	}
 
@@ -2052,6 +2553,47 @@ float AHexGridActor::ScoreEnemyBotGroupTactics(AHexUnitActor* EnemyUnit, const F
 		}
 	}
 
+	// Pre-emptive reinforcement: only idle/non-engaged units are pulled toward a
+	// fight that the forecast says the frontline is likely to lose.
+	if (!HasEnemyBotCurrentAttackTarget(EnemyUnit))
+	{
+		float ReinforcementNeed = 0.0f;
+		AHexUnitActor* ReinforcementTarget = FindEnemyBotPreemptiveSupportTarget(EnemyUnit, &ReinforcementNeed);
+		if (IsValid(ReinforcementTarget) && ReinforcementNeed > 0.0f)
+		{
+			const FIntPoint ReinforcementCoord = ReinforcementTarget->GetGridCoord();
+			const int32 CurrentDistanceToReinforcement = GetHexDistance(
+				CurrentCoord.X, CurrentCoord.Y,
+				ReinforcementCoord.X, ReinforcementCoord.Y
+			);
+			const int32 CandidateDistanceToReinforcement = GetHexDistance(
+				CandidateCoord.X, CandidateCoord.Y,
+				ReinforcementCoord.X, ReinforcementCoord.Y
+			);
+
+			if (CandidateDistanceToReinforcement < CurrentDistanceToReinforcement)
+			{
+				const int32 ClosedDistance =
+					CurrentDistanceToReinforcement - CandidateDistanceToReinforcement;
+
+				Score += static_cast<float>(ClosedDistance) * EnemyBotPreemptiveReinforcementMoveScore;
+				Score += ReinforcementNeed * 0.65f;
+			}
+			else if (CandidateDistanceToReinforcement > CurrentDistanceToReinforcement &&
+				!bCanAttackFromCandidate && !bCanHealFromCandidate)
+			{
+				Score -= static_cast<float>(
+					CandidateDistanceToReinforcement - CurrentDistanceToReinforcement
+				) * EnemyBotPreemptiveReinforcementMoveScore * 0.70f;
+			}
+
+			if (CandidateDistanceToReinforcement <= FMath::Max(1, EnemyBotReinforcementArrivalRange))
+			{
+				Score += EnemyBotPreemptiveReinforcementArrivalScore;
+			}
+		}
+	}
+
 	int32 ThreatenedAllyDamage = 0;
 	AHexUnitActor* ThreatenedAlly = FindMostThreatenedEnemyAlly(EnemyUnit, &ThreatenedAllyDamage);
 	if (IsValid(ThreatenedAlly))
@@ -2115,7 +2657,13 @@ float AHexGridActor::ScoreEnemyBotStrategicStateForUnit(AHexUnitActor* EnemyUnit
 		}
 	}
 
-	Score += static_cast<float>(GetEnemyAllyCountNearCell(VirtualCoord, 2, EnemyUnit)) * EnemyBotFormationCohesionScore * 0.65f;
+	const int32 VirtualAdjacentAllies = GetEnemyAllyCountNearCell(VirtualCoord, 1, EnemyUnit);
+	const int32 VirtualNearbyAllies = GetEnemyAllyCountNearCell(VirtualCoord, 2, EnemyUnit);
+	Score += static_cast<float>(FMath::Min(VirtualNearbyAllies, 2)) * EnemyBotFormationCohesionScore * 0.65f;
+	if (VirtualAdjacentAllies >= 2)
+	{
+		Score -= static_cast<float>(VirtualAdjacentAllies - 1) * EnemyBotAdjacentCrowdingPenalty * 0.55f;
+	}
 
 	int32 DirectThreatDamage = 0;
 	if (IsCellThreatenedByPlayerUnits(VirtualCoord.X, VirtualCoord.Y, DirectThreatDamage))
@@ -2241,6 +2789,31 @@ bool AHexGridActor::IsEnemyBotMovePurposeful(AHexUnitActor* EnemyUnit, const FIn
 		}
 	}
 
+	// Moving an idle unit toward a forecasted losing engagement is a valid tactical
+	// purpose even before anybody there has actually lost much HP.
+	if (!HasEnemyBotCurrentAttackTarget(EnemyUnit))
+	{
+		float ReinforcementNeed = 0.0f;
+		AHexUnitActor* ReinforcementTarget = FindEnemyBotPreemptiveSupportTarget(EnemyUnit, &ReinforcementNeed);
+		if (IsValid(ReinforcementTarget) && ReinforcementNeed > 0.0f)
+		{
+			const FIntPoint ReinforcementCoord = ReinforcementTarget->GetGridCoord();
+			const int32 CurrentDistanceToReinforcement = GetHexDistance(
+				CurrentCoord.X, CurrentCoord.Y,
+				ReinforcementCoord.X, ReinforcementCoord.Y
+			);
+			const int32 TargetDistanceToReinforcement = GetHexDistance(
+				TargetCoord.X, TargetCoord.Y,
+				ReinforcementCoord.X, ReinforcementCoord.Y
+			);
+
+			if (TargetDistanceToReinforcement < CurrentDistanceToReinforcement)
+			{
+				return true;
+			}
+		}
+	}
+
 	AHexUnitActor* ThreatenedAlly = FindMostThreatenedEnemyAlly(EnemyUnit, nullptr);
 	if (IsValid(ThreatenedAlly))
 	{
@@ -2255,7 +2828,11 @@ bool AHexGridActor::IsEnemyBotMovePurposeful(AHexUnitActor* EnemyUnit, const FIn
 
 	const int32 CurrentNearbyAllies = GetEnemyAllyCountNearCell(CurrentCoord, 2, EnemyUnit);
 	const int32 TargetNearbyAllies = GetEnemyAllyCountNearCell(TargetCoord, 2, EnemyUnit);
-	if (TargetNearbyAllies > CurrentNearbyAllies)
+	const int32 TargetAdjacentAllies = GetEnemyAllyCountNearCell(TargetCoord, 1, EnemyUnit);
+
+	// Regroup only if the unit is actually isolated. Merely increasing the ally count is not
+	// a tactical purpose: that old rule was the main reason the army compressed into one blob.
+	if (CurrentNearbyAllies <= 0 && TargetNearbyAllies > 0 && TargetAdjacentAllies <= 1)
 	{
 		return true;
 	}
@@ -2264,13 +2841,14 @@ bool AHexGridActor::IsEnemyBotMovePurposeful(AHexUnitActor* EnemyUnit, const FIn
 	const int32 TargetNearestPlayerDistance = GetNearestPlayerDistanceFromCell(TargetCoord);
 	if (CurrentNearestPlayerDistance != MAX_int32 && TargetNearestPlayerDistance != MAX_int32 && TargetNearestPlayerDistance < CurrentNearestPlayerDistance)
 	{
-		// General advance is useful only when it preserves local support, except when this is the last enemy alive.
-		if ((TargetNearbyAllies >= CurrentNearbyAllies && TargetNearbyAllies > 0) || GetAliveUnitCountForTeam(EHexUnitTeam::Enemy) <= 1)
+		// Forward progress is a purpose by itself as long as the unit does not completely abandon the army.
+		// It is allowed to go from two nearby allies to one; otherwise a compact formation can never open up.
+		if (GetAliveUnitCountForTeam(EHexUnitTeam::Enemy) <= 1 || TargetNearbyAllies > 0)
 		{
 			return true;
 		}
 
-		// Frontline units may close the gap with slightly looser spacing. The backline has separate hard safety rules.
+		// Frontline units may establish the new battle line one step ahead of the rest.
 		if (IsEnemyBotFrontlineUnit(EnemyUnit) && GetEnemyAllyCountNearCell(TargetCoord, 3, EnemyUnit) > 0)
 		{
 			return true;
@@ -2307,6 +2885,10 @@ bool AHexGridActor::TryEnemyBotChampionAbility(AHexUnitActor* Champion)
 		AHexUnitActor* Target = FindBestEnemyBotMarkedForDeathTarget(Champion);
 		if (!IsValid(Target))
 		{
+			UE_LOG(LogTemp, Verbose, TEXT(
+				"Enemy bot skipped Marked for Death: no target is expected to take damage this turn or next. Champion=%s"),
+				*GetNameSafe(Champion)
+			);
 			return false;
 		}
 
@@ -8017,8 +8599,6 @@ void AHexGridActor::RunEnemyBotTurn()
 		return;
 	}
 
-	//                                ,                             , hit-reaction             .
-	//                                                                                  .
 	if ((HasBusyEnemyBotUnit() || HasBusyPlayerUnit()) && EnemyBotBusyRetriesDone < FMath::Max(0, EnemyBotMaxBusyRetries))
 	{
 		ScheduleEnemyBotRetryAfterBusyUnit();
@@ -8034,32 +8614,388 @@ void AHexGridActor::RunEnemyBotTurn()
 
 	RefreshEnemyBotPlan(false);
 
-	if (EnemyBotUnits.Num() == 0)
-	{
-		CollectAliveEnemyUnits(EnemyBotUnits);
-		EnemyBotUnitIndex = 0;
-	}
+	// Rebuild and re-sort after EVERY action. The previous round-robin behavior gave a huge
+	// priority bonus to units that had not acted yet, so the bot often did move(A), move(B)
+	// even when A had just entered attack range. The planner below chooses the best action
+	// for the whole army at the current board state instead.
+	CollectAliveEnemyUnits(EnemyBotUnits);
+	EnemyBotUnitIndex = 0;
 
-	if (EnemyBotUnits.Num() == 0)
+	if (EnemyBotUnits.IsEmpty())
 	{
 		UE_LOG(LogTemp, Log, TEXT("Enemy bot turn finished: no alive enemies."));
 		FinishEnemyTurn();
 		return;
 	}
 
-	int32 CheckedUnits = 0;
-	while (CheckedUnits < EnemyBotUnits.Num())
+	auto FindBestImmediateAttacker = [this](bool bKillsOnly) -> AHexUnitActor*
 	{
-		if (EnemyBotUnitIndex >= EnemyBotUnits.Num())
+		AHexUnitActor* BestAttacker = nullptr;
+		float BestScore = -1000000000.0f;
+
+		for (AHexUnitActor* Unit : EnemyBotUnits)
 		{
-			EnemyBotUnitIndex = 0;
+			if (!IsValid(Unit) || Unit->GetIsDead() || !Unit->CanAct() || !CanUnitAttackThisTurn(Unit) ||
+				!HasEnoughActionPoints(CalculateAttackActionPointCost()))
+			{
+				continue;
+			}
+
+			AHexUnitActor* Target = FindBestEnemyBotAttackTarget(Unit);
+			if (!IsValid(Target))
+			{
+				continue;
+			}
+
+			const bool bCanKill = Target->GetModifiedIncomingDamage(Unit->AttackDamage) >= Target->CurrentHealth;
+			if (bKillsOnly && !bCanKill)
+			{
+				continue;
+			}
+
+			float Score = ScoreEnemyBotAttackTarget(Unit, Target);
+			if (bCanKill)
+			{
+				Score += EnemyBotExecuteKillBonus * 2.0f;
+			}
+			if (EnemyBotPlannedFocusTarget.Get() == Target)
+			{
+				Score += EnemyBotPlanCommitmentScore;
+			}
+			// After a unit moved into range, do not punish it so heavily for taking the follow-up attack.
+			Score -= static_cast<float>(FMath::Max(0, GetEnemyBotActionCountThisTurn(Unit) - 1)) * EnemyBotRepeatActionPenalty * 0.20f;
+
+			if (Score > BestScore)
+			{
+				BestScore = Score;
+				BestAttacker = Unit;
+			}
 		}
 
-		AHexUnitActor* EnemyUnit = EnemyBotUnits[EnemyBotUnitIndex];
-		EnemyBotUnitIndex++;
-		CheckedUnits++;
+		return BestAttacker;
+	};
 
-		if (TrySpendEnemyBotMove(EnemyUnit))
+	// 1. Never walk away from a free kill.
+	if (AHexUnitActor* Killer = FindBestImmediateAttacker(true))
+	{
+		if (TryEnemyBotAttack(Killer))
+		{
+			return;
+		}
+	}
+
+	// 2. Emergency healing can interrupt the attack sequence only when it prevents a likely death
+	// or when an important ally is already critically low.
+	AHexUnitActor* EmergencyHealer = nullptr;
+	float BestEmergencyHealScore = -1000000000.0f;
+	for (AHexUnitActor* Unit : EnemyBotUnits)
+	{
+		if (!IsValid(Unit) || !Unit->CanAct() || !Unit->CanHeal() || !HasEnoughActionPoints(CalculateHealActionPointCost(Unit)))
+		{
+			continue;
+		}
+
+		float HealScore = -1000000000.0f;
+		AHexUnitActor* HealTarget = FindBestEnemyBotHealTargetFromCell(Unit, Unit->GetGridCoord(), &HealScore);
+		if (!IsValid(HealTarget))
+		{
+			continue;
+		}
+
+		const int32 EffectiveHeal = FMath::Min(FMath::Max(0, Unit->HealAmount), FMath::Max(0, HealTarget->MaxHealth - HealTarget->CurrentHealth));
+		const float TargetHp = HealTarget->MaxHealth > 0
+			? static_cast<float>(HealTarget->CurrentHealth) / static_cast<float>(HealTarget->MaxHealth)
+			: 1.0f;
+		const bool bSavesFromLikelyDeath = IsEnemyBotAllyDoomed(HealTarget, 0) && !IsEnemyBotAllyDoomed(HealTarget, EffectiveHeal);
+		const bool bCritical = bSavesFromLikelyDeath || TargetHp <= 0.40f;
+
+		if (bCritical && HealScore > BestEmergencyHealScore)
+		{
+			BestEmergencyHealScore = HealScore;
+			EmergencyHealer = Unit;
+		}
+	}
+
+	if (IsValid(EmergencyHealer) && TryEnemyBotHeal(EmergencyHealer))
+	{
+		return;
+	}
+
+	// 3. PRE-EMPTIVE REINFORCEMENT.
+	// If a frontline engagement is forecast to be losing at FULL-health assumptions,
+	// spend one action pulling in a free unit that currently has no player in attack range.
+	// We still reserve AP for one already-available attack, so this does not turn into
+	// "everyone walks and nobody hits".
+	{
+		AHexUnitActor* ImmediateAttackerToPreserve = FindBestImmediateAttacker(false);
+		const int32 ReservedAttackAP = IsValid(ImmediateAttackerToPreserve)
+			? CalculateAttackActionPointCost()
+			: 0;
+
+		AHexUnitActor* BestHelper = nullptr;
+		AHexUnitActor* BestSupportTarget = nullptr;
+		FIntPoint BestHelperTargetCoord = FIntPoint::ZeroValue;
+		TArray<FHexCoord> BestHelperPath;
+		float BestReinforcementPlannerScore = -1000000000.0f;
+
+		for (AHexUnitActor* Unit : EnemyBotUnits)
+		{
+			if (!IsValid(Unit) || Unit->GetIsDead() || !Unit->CanAct())
+			{
+				continue;
+			}
+
+			// A unit already fighting should keep fighting. Reinforcement duty is for pieces
+			// that otherwise have no enemy in their current attack zone.
+			if (HasEnemyBotCurrentAttackTarget(Unit))
+			{
+				continue;
+			}
+
+			// One proactive relocation per helper per enemy turn. This prevents a single unit
+			// from consuming the whole shared AP pool while other idle helpers remain unused.
+			if (GetEnemyBotActionCountThisTurn(Unit) > 0)
+			{
+				continue;
+			}
+
+			float ReinforcementNeed = 0.0f;
+			AHexUnitActor* SupportTarget = FindEnemyBotPreemptiveSupportTarget(Unit, &ReinforcementNeed);
+			if (!IsValid(SupportTarget) || ReinforcementNeed <= 0.0f)
+			{
+				continue;
+			}
+
+			FIntPoint CandidateTarget;
+			TArray<FHexCoord> CandidatePath;
+			float CandidateMoveScore = -1000000000.0f;
+			if (!FindBestEnemyBotMove(Unit, CandidateTarget, CandidatePath, &CandidateMoveScore) ||
+				CandidatePath.IsEmpty())
+			{
+				continue;
+			}
+
+			const FIntPoint UnitCoord = Unit->GetGridCoord();
+			const FIntPoint SupportCoord = SupportTarget->GetGridCoord();
+			const int32 CurrentDistanceToSupport = GetHexDistance(
+				UnitCoord.X, UnitCoord.Y,
+				SupportCoord.X, SupportCoord.Y
+			);
+			const int32 CandidateDistanceToSupport = GetHexDistance(
+				CandidateTarget.X, CandidateTarget.Y,
+				SupportCoord.X, SupportCoord.Y
+			);
+
+			// Do not label an unrelated movement as "reinforcement".
+			if (CandidateDistanceToSupport >= CurrentDistanceToSupport)
+			{
+				continue;
+			}
+
+			const int32 MoveCost = CalculateMoveActionPointCost(CandidatePath.Num());
+			if (CurrentActionPoints < MoveCost + ReservedAttackAP)
+			{
+				continue;
+			}
+
+			const int32 ClosedDistance = CurrentDistanceToSupport - CandidateDistanceToSupport;
+			float PlannerScore = CandidateMoveScore + ReinforcementNeed;
+			PlannerScore += static_cast<float>(ClosedDistance) * EnemyBotPreemptiveReinforcementMoveScore;
+
+			if (CandidateDistanceToSupport <= FMath::Max(1, EnemyBotReinforcementArrivalRange))
+			{
+				PlannerScore += EnemyBotPreemptiveReinforcementArrivalScore;
+			}
+
+			if (PlannerScore > BestReinforcementPlannerScore)
+			{
+				BestReinforcementPlannerScore = PlannerScore;
+				BestHelper = Unit;
+				BestSupportTarget = SupportTarget;
+				BestHelperTargetCoord = CandidateTarget;
+				BestHelperPath = CandidatePath;
+			}
+		}
+
+		if (IsValid(BestHelper) && IsValid(BestSupportTarget) && !BestHelperPath.IsEmpty())
+		{
+			UE_LOG(LogTemp, Log, TEXT(
+				"Enemy bot pre-emptive reinforcement: Helper=%s Support=%s Score=%.1f AP=%d"),
+				*GetNameSafe(BestHelper),
+				*GetNameSafe(BestSupportTarget),
+				BestReinforcementPlannerScore,
+				CurrentActionPoints
+			);
+
+			if (ExecuteEnemyBotMove(BestHelper, BestHelperTargetCoord, BestHelperPath))
+			{
+				return;
+			}
+		}
+	}
+
+	// 4. If ANY unit can attack now, attack now. The move->attack rule still applies,
+	// but only after the AI has secured a forecasted losing flank with an idle helper.
+	if (AHexUnitActor* Attacker = FindBestImmediateAttacker(false))
+	{
+		if (TryEnemyBotAttack(Attacker))
+		{
+			return;
+		}
+	}
+
+	// 5. With no current attack, use a champion ability only if its existing tactical rules approve it.
+	for (AHexUnitActor* Unit : EnemyBotUnits)
+	{
+		if (TryEnemyBotChampionAbility(Unit))
+		{
+			return;
+		}
+	}
+
+	// 6. Useful normal healing before spending AP on another positional move.
+	AHexUnitActor* BestHealer = nullptr;
+	float BestHealScore = -1000000000.0f;
+	for (AHexUnitActor* Unit : EnemyBotUnits)
+	{
+		if (!IsValid(Unit) || !Unit->CanAct() || !Unit->CanHeal() || !HasEnoughActionPoints(CalculateHealActionPointCost(Unit)))
+		{
+			continue;
+		}
+
+		float HealScore = -1000000000.0f;
+		if (IsValid(FindBestEnemyBotHealTargetFromCell(Unit, Unit->GetGridCoord(), &HealScore)) && HealScore > BestHealScore)
+		{
+			BestHealScore = HealScore;
+			BestHealer = Unit;
+		}
+	}
+
+	if (IsValid(BestHealer) && BestHealScore >= 650.0f && TryEnemyBotHeal(BestHealer))
+	{
+		return;
+	}
+
+	// 7. Pick ONE best movement for the whole army. Moves that create an immediate attack and
+	// leave enough AP for that attack receive a dominant bonus. This prevents spending the turn
+	// moving several pieces while a first mover is already ready to contribute damage.
+	AHexUnitActor* BestMover = nullptr;
+	FIntPoint BestMoveTarget = FIntPoint::ZeroValue;
+	TArray<FHexCoord> BestMovePath;
+	float BestMovePlannerScore = -1000000000.0f;
+
+	const bool bApproachPhase = IsEnemyBotArmyInApproachPhase();
+	const int32 UnactedUnitsDuringApproach = bApproachPhase ? GetEnemyBotUnactedUnitCount(nullptr) : 0;
+
+	int32 ArmyFrontDistance = MAX_int32;
+	if (bApproachPhase)
+	{
+		for (AHexUnitActor* MarchUnit : EnemyBotUnits)
+		{
+			if (!IsValid(MarchUnit) || MarchUnit->GetIsDead())
+			{
+				continue;
+			}
+
+			ArmyFrontDistance = FMath::Min(
+				ArmyFrontDistance,
+				GetNearestPlayerDistanceFromCell(MarchUnit->GetGridCoord())
+			);
+		}
+	}
+
+	for (AHexUnitActor* Unit : EnemyBotUnits)
+	{
+		if (!IsValid(Unit) || Unit->GetIsDead() || !Unit->CanAct())
+		{
+			continue;
+		}
+
+		// In approach mode, give every available unit one marching action before allowing
+		// the same piece to move again. With the shared AP pool this makes the whole army
+		// translate forward instead of one or two characters creeping ahead repeatedly.
+		if (bApproachPhase &&
+			UnactedUnitsDuringApproach > 0 &&
+			GetEnemyBotActionCountThisTurn(Unit) > 0)
+		{
+			continue;
+		}
+
+		FIntPoint CandidateTarget;
+		TArray<FHexCoord> CandidatePath;
+		float CandidateScore = -1000000000.0f;
+		if (!FindBestEnemyBotMove(Unit, CandidateTarget, CandidatePath, &CandidateScore))
+		{
+			continue;
+		}
+
+		const int32 MoveCost = CalculateMoveActionPointCost(CandidatePath.Num());
+		bool bCanKillAfterMove = false;
+		const bool bCreatesAttack = CanEnemyBotAttackAnyPlayerFromCell(Unit, CandidateTarget, &bCanKillAfterMove);
+		const bool bCanFollowWithAttack = bCreatesAttack &&
+			CanUnitAttackThisTurn(Unit) &&
+			CurrentActionPoints >= MoveCost + CalculateAttackActionPointCost();
+
+		float PlannerScore = CandidateScore;
+
+		if (bApproachPhase)
+		{
+			const int32 CurrentPlayerDistance = GetNearestPlayerDistanceFromCell(Unit->GetGridCoord());
+			const int32 CandidatePlayerDistance = GetNearestPlayerDistanceFromCell(CandidateTarget);
+
+			if (CurrentPlayerDistance != MAX_int32 && CandidatePlayerDistance != MAX_int32)
+			{
+				const int32 AdvanceSteps = CurrentPlayerDistance - CandidatePlayerDistance;
+				if (AdvanceSteps > 0)
+				{
+					PlannerScore += static_cast<float>(AdvanceSteps) * EnemyBotApproachAdvanceScore;
+				}
+				else
+				{
+					PlannerScore -= EnemyBotApproachNoProgressPenalty;
+				}
+
+				// Move the rear of the formation first. After it catches up, the front can
+				// advance without tripping the hard connectivity/depth constraints.
+				if (ArmyFrontDistance != MAX_int32)
+				{
+					const int32 RearLag = FMath::Max(0, CurrentPlayerDistance - ArmyFrontDistance);
+					PlannerScore += static_cast<float>(RearLag) * EnemyBotApproachRearPriorityScore;
+				}
+			}
+		}
+
+		if (bCanFollowWithAttack)
+		{
+			PlannerScore += EnemyBotMoveIntoAttackBonus;
+			if (bCanKillAfterMove)
+			{
+				PlannerScore += EnemyBotExecuteKillBonus;
+			}
+		}
+
+		const int32 ActionsAlreadyTaken = GetEnemyBotActionCountThisTurn(Unit);
+		if (ActionsAlreadyTaken <= 0)
+		{
+			PlannerScore += EnemyBotFirstActionPriorityBonus * 0.20f;
+		}
+		else if (!bCanFollowWithAttack)
+		{
+			PlannerScore -= static_cast<float>(ActionsAlreadyTaken) * EnemyBotRepeatActionPenalty * 0.35f;
+		}
+
+		if (PlannerScore > BestMovePlannerScore)
+		{
+			BestMovePlannerScore = PlannerScore;
+			BestMover = Unit;
+			BestMoveTarget = CandidateTarget;
+			BestMovePath = CandidatePath;
+		}
+	}
+
+	if (IsValid(BestMover) && BestMovePath.Num() > 0)
+	{
+		if (ExecuteEnemyBotMove(BestMover, BestMoveTarget, BestMovePath))
 		{
 			return;
 		}
@@ -8071,7 +9007,7 @@ void AHexGridActor::RunEnemyBotTurn()
 		return;
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("Enemy bot turn finished: no enemy can spend remaining AP=%d."), CurrentActionPoints);
+	UE_LOG(LogTemp, Log, TEXT("Enemy bot turn finished: no useful global action for remaining AP=%d."), CurrentActionPoints);
 	FinishEnemyTurn();
 }
 
@@ -8971,6 +9907,130 @@ bool AHexGridActor::FindBestEnemyBotMove(AHexUnitActor* EnemyUnit, FIntPoint& Ou
 	}
 
 	const FIntPoint StartCoord = EnemyUnit->GetGridCoord();
+	const bool bApproachPhase = IsEnemyBotArmyInApproachPhase();
+
+	struct FEnemyFormationMetrics
+	{
+		int32 NearestAllyDistance = MAX_int32;
+		int32 Diameter = 0;
+		int32 DepthSpread = 0;
+
+		// Whole-army connectivity. NearestAllyDistance alone is not enough:
+		// two separate groups (3 + 2) can both look locally "connected".
+		int32 ConnectedComponents = 0;
+		int32 LargestConnectedComponentSize = 0;
+		int32 DetachedUnitCount = 0;
+	};
+
+	auto MeasureFormationWithVirtualUnit = [this, EnemyUnit](const FIntPoint& VirtualCoord) -> FEnemyFormationMetrics
+	{
+		FEnemyFormationMetrics Metrics;
+		TArray<FIntPoint> EnemyCoords;
+		EnemyCoords.Reserve(5);
+		int32 MinPlayerDistance = MAX_int32;
+		int32 MaxPlayerDistance = 0;
+
+		for (const TPair<FIntPoint, AHexUnitActor*>& Pair : UnitsByCoord)
+		{
+			AHexUnitActor* Unit = Pair.Value;
+			if (!IsValid(Unit) || Unit->GetIsDead() || Unit->Team != EHexUnitTeam::Enemy)
+			{
+				continue;
+			}
+
+			const FIntPoint Coord = Unit == EnemyUnit ? VirtualCoord : Unit->GetGridCoord();
+			EnemyCoords.Add(Coord);
+			const int32 PlayerDistance = GetNearestPlayerDistanceFromCell(Coord);
+			if (PlayerDistance != MAX_int32)
+			{
+				MinPlayerDistance = FMath::Min(MinPlayerDistance, PlayerDistance);
+				MaxPlayerDistance = FMath::Max(MaxPlayerDistance, PlayerDistance);
+			}
+		}
+
+		for (int32 A = 0; A < EnemyCoords.Num(); ++A)
+		{
+			for (int32 B = A + 1; B < EnemyCoords.Num(); ++B)
+			{
+				const int32 Distance = GetHexDistance(EnemyCoords[A].X, EnemyCoords[A].Y, EnemyCoords[B].X, EnemyCoords[B].Y);
+				Metrics.Diameter = FMath::Max(Metrics.Diameter, Distance);
+			}
+		}
+
+		// Treat the army as a graph: two units are linked when they are within
+		// EnemyBotFormationLinkRange. This catches a 3+2 split even when every
+		// individual unit still has a nearby friend.
+		if (!EnemyCoords.IsEmpty())
+		{
+			const int32 LinkRange = FMath::Max(1, EnemyBotFormationLinkRange);
+			TArray<bool> Visited;
+			Visited.Init(false, EnemyCoords.Num());
+
+			for (int32 StartIndex = 0; StartIndex < EnemyCoords.Num(); ++StartIndex)
+			{
+				if (Visited[StartIndex])
+				{
+					continue;
+				}
+
+				++Metrics.ConnectedComponents;
+				int32 ComponentSize = 0;
+				TArray<int32> Queue;
+				Queue.Add(StartIndex);
+				Visited[StartIndex] = true;
+
+				for (int32 QueueIndex = 0; QueueIndex < Queue.Num(); ++QueueIndex)
+				{
+					const int32 A = Queue[QueueIndex];
+					++ComponentSize;
+
+					for (int32 B = 0; B < EnemyCoords.Num(); ++B)
+					{
+						if (Visited[B])
+						{
+							continue;
+						}
+
+						const int32 Distance = GetHexDistance(
+							EnemyCoords[A].X, EnemyCoords[A].Y,
+							EnemyCoords[B].X, EnemyCoords[B].Y
+						);
+						if (Distance <= LinkRange)
+						{
+							Visited[B] = true;
+							Queue.Add(B);
+						}
+					}
+				}
+
+				Metrics.LargestConnectedComponentSize =
+					FMath::Max(Metrics.LargestConnectedComponentSize, ComponentSize);
+			}
+
+			Metrics.DetachedUnitCount =
+				FMath::Max(0, EnemyCoords.Num() - Metrics.LargestConnectedComponentSize);
+		}
+
+		for (const FIntPoint& Coord : EnemyCoords)
+		{
+			if (Coord == VirtualCoord)
+			{
+				continue;
+			}
+			Metrics.NearestAllyDistance = FMath::Min(
+				Metrics.NearestAllyDistance,
+				GetHexDistance(VirtualCoord.X, VirtualCoord.Y, Coord.X, Coord.Y)
+			);
+		}
+
+		if (MinPlayerDistance != MAX_int32)
+		{
+			Metrics.DepthSpread = FMath::Max(0, MaxPlayerDistance - MinPlayerDistance);
+		}
+		return Metrics;
+	};
+
+	const FEnemyFormationMetrics CurrentFormation = MeasureFormationWithVirtualUnit(StartCoord);
 
 	int32 ReservedActionPointsForUnactedAllies = 0;
 	if (GetEnemyBotActionCountThisTurn(EnemyUnit) <= 0)
@@ -9058,8 +10118,10 @@ bool AHexGridActor::FindBestEnemyBotMove(AHexUnitActor* EnemyUnit, FIntPoint& Ou
 				continue;
 			}
 
-			// Advancing without an attack while frontline units still have not moved is never useful.
-			if (!bCanAttackFromCandidate && GetEnemyBotUnactedFrontlineUnitCount(EnemyUnit) > 0)
+			// During normal tactical play the backline waits for the screen to establish itself.
+			// During the pre-contact march this rule is disabled; otherwise it creates a deadlock:
+			// frontline is constrained by formation depth while backline waits for frontline.
+			if (!bApproachPhase && !bCanAttackFromCandidate && GetEnemyBotUnactedFrontlineUnitCount(EnemyUnit) > 0)
 			{
 				const int32 CurrentPlayerDistance = GetNearestPlayerDistanceFromCell(StartCoord);
 				if (CurrentPlayerDistance != MAX_int32 && CandidatePlayerDistance < CurrentPlayerDistance)
@@ -9069,7 +10131,118 @@ bool AHexGridActor::FindBestEnemyBotMove(AHexUnitActor* EnemyUnit, FIntPoint& Ou
 			}
 		}
 
-		const float Score = ScoreEnemyBotMoveCell(EnemyUnit, CandidateCoord, CandidatePath.Num());
+		bool bFormationCanKillAfterMove = false;
+		const bool bFormationCanAttackAfterMove = CanEnemyBotAttackAnyPlayerFromCell(EnemyUnit, CandidateCoord, &bFormationCanKillAfterMove);
+		const bool bFormationLeavesAttackAP = bFormationCanAttackAfterMove && CanUnitAttackThisTurn(EnemyUnit) &&
+			CurrentActionPoints >= MovePointCost + CalculateAttackActionPointCost();
+		const bool bFormationCanHealAfterMove = EnemyUnit->CanHeal() &&
+			IsValid(FindBestEnemyBotHealTargetFromCell(EnemyUnit, CandidateCoord, nullptr)) &&
+			CurrentActionPoints >= MovePointCost + CalculateHealActionPointCost(EnemyUnit);
+		const bool bFormationRetreat = IsMeaningfulEnemyBotRetreat(EnemyUnit, CandidateCoord);
+
+		const FEnemyFormationMetrics CandidateFormation = MeasureFormationWithVirtualUnit(CandidateCoord);
+		const int32 AliveEnemyCount = GetAliveUnitCountForTeam(EHexUnitTeam::Enemy);
+		if (AliveEnemyCount > 1 && !bFormationRetreat)
+		{
+			const int32 LinkRange = FMath::Max(1, EnemyBotFormationLinkRange);
+			const int32 ApproachSlack = bApproachPhase ? FMath::Max(0, EnemyBotApproachFormationSlack) : 0;
+			const int32 MaxDepth = FMath::Max(1, EnemyBotMaxFormationDepth) + ApproachSlack;
+			const int32 MaxDiameter = FMath::Max(3, EnemyBotMaxFormationDiameter) + ApproachSlack;
+			const bool bImmediateContribution = bFormationLeavesAttackAP || bFormationCanHealAfterMove;
+			const int32 TacticalSlack = bImmediateContribution ? 1 : 0;
+
+			// HARD RULE: a connected army may not split into two subgroups because of movement.
+			// Immediate attack is NOT an exception: the attacker may stretch the line, but must
+			// remain connected to the same army graph.
+			if (CurrentFormation.ConnectedComponents <= 1 &&
+				CandidateFormation.ConnectedComponents > 1)
+			{
+				continue;
+			}
+
+			// If the formation is already broken, movement must repair it. Attacks that are
+			// already available can still happen in the global planner, but positional movement
+			// cannot make the 3+2 split persist or become worse.
+			if (CurrentFormation.ConnectedComponents > 1)
+			{
+				const bool bRepairsSplit =
+					CandidateFormation.ConnectedComponents < CurrentFormation.ConnectedComponents ||
+					CandidateFormation.DetachedUnitCount < CurrentFormation.DetachedUnitCount ||
+					CandidateFormation.Diameter < CurrentFormation.Diameter ||
+					CandidateFormation.DepthSpread < CurrentFormation.DepthSpread;
+
+				if (!bRepairsSplit)
+				{
+					continue;
+				}
+			}
+
+			// Local link rule still prevents a single unit from becoming the detached tail/head
+			// of an otherwise connected chain.
+			if (CandidateFormation.NearestAllyDistance > LinkRange + TacticalSlack &&
+				(CurrentFormation.NearestAllyDistance <= LinkRange + TacticalSlack ||
+				 CandidateFormation.NearestAllyDistance >= CurrentFormation.NearestAllyDistance))
+			{
+				continue;
+			}
+
+			if (CandidateFormation.DepthSpread > MaxDepth + TacticalSlack &&
+				CandidateFormation.DepthSpread >= CurrentFormation.DepthSpread)
+			{
+				continue;
+			}
+
+			if (CandidateFormation.Diameter > MaxDiameter + TacticalSlack &&
+				CandidateFormation.Diameter >= CurrentFormation.Diameter)
+			{
+				continue;
+			}
+		}
+
+		float Score = ScoreEnemyBotMoveCell(EnemyUnit, CandidateCoord, CandidatePath.Num());
+
+		// Repair a split formation before spending AP on cosmetic forward movement.
+		if (CandidateFormation.ConnectedComponents < CurrentFormation.ConnectedComponents)
+		{
+			Score += static_cast<float>(CurrentFormation.ConnectedComponents - CandidateFormation.ConnectedComponents)
+				* EnemyBotFormationRepairScore * 2.50f;
+		}
+		if (CandidateFormation.DetachedUnitCount < CurrentFormation.DetachedUnitCount)
+		{
+			Score += static_cast<float>(CurrentFormation.DetachedUnitCount - CandidateFormation.DetachedUnitCount)
+				* EnemyBotFormationRepairScore * 1.75f;
+		}
+
+		if (CandidateFormation.DepthSpread < CurrentFormation.DepthSpread)
+		{
+			Score += static_cast<float>(CurrentFormation.DepthSpread - CandidateFormation.DepthSpread) * EnemyBotFormationRepairScore;
+		}
+		else if (CandidateFormation.DepthSpread > CurrentFormation.DepthSpread && !bFormationLeavesAttackAP)
+		{
+			Score -= static_cast<float>(CandidateFormation.DepthSpread - CurrentFormation.DepthSpread) * EnemyBotFormationRepairScore * 0.75f;
+		}
+
+		if (CandidateFormation.Diameter < CurrentFormation.Diameter)
+		{
+			Score += static_cast<float>(CurrentFormation.Diameter - CandidateFormation.Diameter) * EnemyBotFormationRepairScore * 0.55f;
+		}
+
+		// Candidate selection itself must understand move -> attack. Otherwise the unit-level
+		// move search can choose a prettier formation cell and the global planner never even sees
+		// the cell that would have enabled an immediate hit.
+		bool bCanKillAfterMove = false;
+		const bool bCreatesImmediateAttack = CanEnemyBotAttackAnyPlayerFromCell(EnemyUnit, CandidateCoord, &bCanKillAfterMove);
+		const bool bLeavesAttackAP = bCreatesImmediateAttack && CanUnitAttackThisTurn(EnemyUnit) &&
+			CurrentActionPoints >= MovePointCost + CalculateAttackActionPointCost();
+		if (bLeavesAttackAP)
+		{
+			Score += EnemyBotMoveIntoAttackBonus;
+			if (bCanKillAfterMove)
+			{
+				Score += EnemyBotExecuteKillBonus;
+			}
+		}
+
 		if (!IsEnemyBotMovePurposeful(EnemyUnit, CandidateCoord, CandidatePath, Score))
 		{
 			continue;
