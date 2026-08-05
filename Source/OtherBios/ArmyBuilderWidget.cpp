@@ -563,6 +563,10 @@ bool UArmyBuilderWidget::TryAddUnitClass(TSubclassOf<AHexUnitActor> UnitClass)
 	SelectedArmyUnitClasses.Add(UnitClass);
 	SelectedArmyUnitProgress.Add(MakeProgressForAddedUnit(UnitClass));
 	NormalizeSelectedProgressForCurrentArmy();
+
+	// The visible template is always the active battle template. Persist composition
+	// immediately so there is no separate "edited" vs "saved" army state.
+	CommitSelectedArmyToActivePreset(true);
 	UpdateAllVisuals();
 	return true;
 }
@@ -588,6 +592,10 @@ bool UArmyBuilderWidget::RemoveSelectedUnitAt(int32 SelectedIndex)
 		SelectedArmyUnitProgress.RemoveAt(SelectedIndex);
 	}
 	NormalizeSelectedProgressForCurrentArmy();
+
+	// Removing a card changes the active template immediately and also invalidates
+	// its old deployment because unit indexes belong to the exact composition.
+	CommitSelectedArmyToActivePreset(true);
 	UpdateAllVisuals();
 	return true;
 }
@@ -1243,6 +1251,10 @@ bool UArmyBuilderWidget::DoesUnitPassCurrentFilters(TSubclassOf<AHexUnitActor> U
 
 void UArmyBuilderWidget::HandleMainMenuClicked()
 {
+	// Final safety flush. Normal add/remove/deployment actions already autosave, but
+	// leaving the widget must never expose a state different from what was on screen.
+	CommitSelectedArmyToActivePreset(true);
+
 	UMainMenuWidget* MenuToShow = ParentMainMenu;
 	ParentMainMenu = nullptr;
 
@@ -1299,10 +1311,14 @@ void UArmyBuilderWidget::HandleShowDeploymentClicked()
 {
 	if (!IsSelectedArmyReadyForBattle())
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Show deployment blocked: save/select a ready army first."));
+		UE_LOG(LogTemp, Warning, TEXT("Show deployment blocked: select a ready army first."));
 		UpdateAllVisuals();
 		return;
 	}
+
+	// Deployment always opens for exactly the composition currently visible in the
+	// builder. This is mostly a safety sync because composition edits autosave too.
+	CommitSelectedArmyToActivePreset(true);
 
 	if (!DeploymentWidgetClass)
 	{
@@ -2048,6 +2064,9 @@ void UArmyBuilderWidget::SelectArmyPreset(int32 NewPresetIndex)
 	const int32 SafePresetIndex = FMath::Clamp(NewPresetIndex, 0, 4);
 	if (SafePresetIndex == ActiveArmyPresetIndex)
 	{
+		// Clicking the already-visible template still acts as an explicit selection
+		// and guarantees that its on-screen state is persisted.
+		CommitSelectedArmyToActivePreset(true);
 		UpdateArmyPresetVisuals();
 		return;
 	}
