@@ -549,6 +549,34 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Decision Model", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float EnemyBotDecisionTemperatureScale = 1.0f;
 
+	// Tiny CPU policy/value network (1,666 parameters) guiding a bounded search over a POD
+	// snapshot. Legal actions and final validation always remain in C++.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Neural Search")
+	bool bEnableEnemyBotNeuralPlanner = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Neural Search", meta = (ClampMin = "1", ClampMax = "12"))
+	int32 EnemyBotNeuralSearchDepth = 5;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Neural Search", meta = (ClampMin = "1", ClampMax = "64"))
+	int32 EnemyBotNeuralTopK = 8;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Neural Search", meta = (ClampMin = "0", ClampMax = "16"))
+	int32 EnemyBotNeuralSafetyCandidates = 2;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Neural Search", meta = (ClampMin = "1", ClampMax = "1000000"))
+	int32 EnemyBotNeuralNodeBudget = 600;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Neural Search", meta = (ClampMin = "0.1", ClampMax = "100.0"))
+	float EnemyBotNeuralTimeBudgetMilliseconds = 4.0f;
+
+	// 0 = transparent tactical ordering only, 1 = learned policy only.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Neural Search", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float EnemyBotNeuralPolicyBlend = 0.55f;
+
+	// 0 = material evaluation only, 1 = learned value only.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Neural Search", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float EnemyBotNeuralValueBlend = 0.55f;
+
 	// Kept for serialized Blueprint compatibility. Random score corruption was replaced by
 	// bounded probabilistic selection in the decision model and this value is no longer used.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Legacy", meta = (ClampMin = "0.0"))
@@ -2132,9 +2160,12 @@ private:
 	void ScheduleEnemyBotRetryAfterBusyUnit();
 	void ScheduleEnemyBotContinueAfterAction();
 	void RunEnemyBotTurn();
+	bool TryEnemyBotNeuralPlannerAction();
 	bool TrySpendEnemyBotMove(AHexUnitActor* EnemyUnit);
 	bool TryEnemyBotAttack(AHexUnitActor* EnemyUnit);
+	bool TryEnemyBotAttackTarget(AHexUnitActor* EnemyUnit, AHexUnitActor* Target);
 	bool TryEnemyBotHeal(AHexUnitActor* Healer);
+	bool TryEnemyBotHealTarget(AHexUnitActor* Healer, AHexUnitActor* Target);
 	bool TryEnemyBotMove(AHexUnitActor* EnemyUnit);
 	bool ExecuteEnemyBotMove(AHexUnitActor* EnemyUnit, const FIntPoint& TargetCoord, const TArray<FHexCoord>& CoordPath);
 	AHexUnitActor* FindBestEnemyBotAttackTarget(AHexUnitActor* EnemyUnit) const;
