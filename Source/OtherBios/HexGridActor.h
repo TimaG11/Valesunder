@@ -539,7 +539,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI", meta = (ClampMin = "0.0"))
 	float EnemyBotRetreatDistanceScore = 45.0f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI", meta = (ClampMin = "0.0"))
+	// Influence of the normalized Utility AI model on legacy tactical scores.
+	// The model uses expected damage, target value, exposure, AP efficiency and team cohesion.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Decision Model", meta = (ClampMin = "0.0", ClampMax = "1000.0"))
+	float EnemyBotDecisionModelWeight = 260.0f;
+
+	// Scales Boltzmann exploration between near-optimal choices. Nightmare is deterministic
+	// regardless of this value; forced kills and life-saving actions are never randomized away.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Decision Model", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float EnemyBotDecisionTemperatureScale = 1.0f;
+
+	// Kept for serialized Blueprint compatibility. Random score corruption was replaced by
+	// bounded probabilistic selection in the decision model and this value is no longer used.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Hex Grid|Turns|Enemy Bot AI|Legacy", meta = (ClampMin = "0.0"))
 	float EnemyBotRandomScoreJitter = 8.0f;
 
 	//                ,                                                                .
@@ -2054,12 +2066,10 @@ private:
 	bool IsEnemyBotDifficultyAtLeast(EHexBotDifficulty MinimumDifficulty) const;
 	float GetEnemyBotDifficultyTargetPriorityScale() const;
 	float GetEnemyBotDifficultyKillScoreScale() const;
-	float GetEnemyBotDifficultyMistakeChance() const;
 	float GetEnemyBotDifficultyFutureThreatScale() const;
 	float GetEnemyBotTargetBaseValue(AHexUnitActor* Target) const;
 	float GetEnemyBotFactionTargetBonus(AHexUnitActor* EnemyUnit, AHexUnitActor* Target) const;
 	float GetEnemyBotFactionMoveBonus(AHexUnitActor* EnemyUnit, const FIntPoint& CandidateCoord, int32 NearestPlayerDistance, bool bCanAttackFromCandidate) const;
-	bool ShouldEnemyBotMakeDifficultyMistake(float ChanceMultiplier = 1.0f) const;
 	int32 GetEnemyBotPlanningDepth() const;
 	void RefreshEnemyBotPlan(bool bForce);
 	AHexUnitActor* FindEnemyBotPlanFocusTarget() const;
