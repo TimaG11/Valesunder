@@ -68,6 +68,28 @@ struct FAccountDeploymentSlotRecord
 	int32 R = 0;
 };
 
+
+/**
+ * One of five independent army templates.
+ * Unit progression and coins remain account-wide; composition, deployment and
+ * faction-effect snapshot belong to the individual template.
+ */
+USTRUCT(BlueprintType)
+struct FAccountArmyPresetRecord
+{
+	GENERATED_BODY()
+
+	// Ordered composition. Duplicate unit classes are intentionally allowed.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Army Presets")
+	TArray<TSoftClassPtr<AHexUnitActor>> UnitClasses;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Army Presets")
+	TArray<FAccountDeploymentSlotRecord> DeploymentSlots;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Army Presets")
+	TArray<FAccountFactionEffectRecord> FactionEffects;
+};
+
 /**
  * Disk-backed account data.
  * Character progression is stored by class, while army composition preserves
@@ -82,10 +104,17 @@ public:
 	virtual void Serialize(FArchive& Ar) override;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account")
-	int32 SaveVersion = 4;
+	int32 SaveVersion = 5;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Progression")
 	TArray<FAccountUnitProgressRecord> UnitProgress;
+
+	// Exactly five reusable army templates. Template 0 is used when migrating old saves.
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Army Presets")
+	TArray<FAccountArmyPresetRecord> ArmyPresets;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Army Presets", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 ActiveArmyPresetIndex = 0;
 
 	// Ordered selected army. Duplicate unit classes are intentionally allowed.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, SaveGame, Category = "Account|Army")

@@ -32,6 +32,8 @@ int32 UArmyBuilderWidget::CachedPreviewArmyPower = 0;
 int32 UArmyBuilderWidget::SavedCoins = 0;
 TArray<FAccountFactionEffectRecord> UArmyBuilderWidget::SavedFactionEffectRecords;
 TArray<FAccountDeploymentSlotRecord> UArmyBuilderWidget::PendingPersistentDeploymentRecords;
+TArray<FAccountArmyPresetRecord> UArmyBuilderWidget::SavedArmyPresetRecords;
+int32 UArmyBuilderWidget::ActiveArmyPresetIndex = 0;
 
 int32 UArmyBuilderWidget::GetSavedCoins()
 {
@@ -124,6 +126,8 @@ void UArmyBuilderWidget::ImportPersistentUnitProgress(const TArray<FAccountUnitP
 
 void UArmyBuilderWidget::ExportPersistentArmyAndCoins(TArray<TSoftClassPtr<AHexUnitActor>>& OutArmyClasses, int32& OutCoins)
 {
+	StoreActiveRuntimeArmyInPreset();
+
 	OutArmyClasses.Reset();
 	OutArmyClasses.Reserve(SavedPlayerArmyUnitClasses.Num());
 
@@ -188,6 +192,74 @@ void UArmyBuilderWidget::ExportPersistentDeployment(TArray<FAccountDeploymentSlo
 void UArmyBuilderWidget::ImportPersistentDeployment(const TArray<FAccountDeploymentSlotRecord>& Records)
 {
 	PendingPersistentDeploymentRecords = Records;
+}
+
+void UArmyBuilderWidget::ExportPersistentArmyPresets(TArray<FAccountArmyPresetRecord>& OutPresets, int32& OutActivePresetIndex)
+{
+	StoreActiveRuntimeArmyInPreset();
+	EnsureArmyPresetStorage();
+
+	OutPresets = SavedArmyPresetRecords;
+	OutActivePresetIndex = FMath::Clamp(ActiveArmyPresetIndex, 0, 4);
+}
+
+void UArmyBuilderWidget::ImportPersistentArmyPresets(const TArray<FAccountArmyPresetRecord>& Presets, int32 InActivePresetIndex)
+{
+	SavedArmyPresetRecords.Reset();
+
+	const int32 PresetsToCopy = FMath::Min(Presets.Num(), 5);
+	for (int32 PresetIndex = 0; PresetIndex < PresetsToCopy; ++PresetIndex)
+	{
+		const FAccountArmyPresetRecord& SourcePreset = Presets[PresetIndex];
+		FAccountArmyPresetRecord& TargetPreset = SavedArmyPresetRecords.AddDefaulted_GetRef();
+
+		for (const TSoftClassPtr<AHexUnitActor>& SoftUnitClass : SourcePreset.UnitClasses)
+		{
+			if (TargetPreset.UnitClasses.Num() >= 5)
+			{
+				break;
+			}
+
+			if (!SoftUnitClass.IsNull())
+			{
+				TargetPreset.UnitClasses.Add(SoftUnitClass);
+			}
+		}
+
+		TargetPreset.DeploymentSlots = SourcePreset.DeploymentSlots;
+
+		for (const FAccountFactionEffectRecord& EffectRecord : SourcePreset.FactionEffects)
+		{
+			if (EffectRecord.UnitCount < 2 || EffectRecord.UnitCount > 5)
+			{
+				continue;
+			}
+
+			if (EffectRecord.FactionValue > static_cast<uint8>(EHexUnitFaction::Bandits) ||
+				EffectRecord.RoleValue > static_cast<uint8>(EArmyFactionEffectRole::Healer))
+			{
+				continue;
+			}
+
+			TargetPreset.FactionEffects.Add(EffectRecord);
+		}
+	}
+
+	EnsureArmyPresetStorage();
+	ActiveArmyPresetIndex = FMath::Clamp(InActivePresetIndex, 0, 4);
+
+	// Do not load Blueprint classes while the SaveGame object itself is still being
+	// deserialized. The existing GameInstance imports the active legacy army after
+	// LoadGameFromSlot returns; inactive templates are loaded only when selected.
+	UE_LOG(LogTemp, Log, TEXT("Persistent army presets imported: Presets=%d Active=%d."),
+		SavedArmyPresetRecords.Num(),
+		ActiveArmyPresetIndex + 1
+	);
+}
+
+int32 UArmyBuilderWidget::GetActiveArmyPresetIndex()
+{
+	return FMath::Clamp(ActiveArmyPresetIndex, 0, 4);
 }
 
 void UArmyBuilderWidget::ImportPersistentArmyAndCoins(const TArray<TSoftClassPtr<AHexUnitActor>>& ArmyClasses, int32 Coins)
@@ -267,9 +339,12 @@ void UArmyBuilderWidget::ImportPersistentArmyAndCoins(const TArray<TSoftClassPtr
 		}
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("Persistent army and coins imported: ArmyUnits=%d Coins=%d."),
+	StoreActiveRuntimeArmyInPreset();
+
+	UE_LOG(LogTemp, Log, TEXT("Persistent army and coins imported: ArmyUnits=%d Coins=%d ActivePreset=%d."),
 		SavedPlayerArmyUnitClasses.Num(),
-		SavedCoins
+		SavedCoins,
+		ActiveArmyPresetIndex + 1
 	);
 }
 
@@ -282,6 +357,8 @@ void UArmyBuilderWidget::ResetSessionAccountState()
 	SavedRosterUnitProgress.Reset();
 	SavedFactionEffectRecords.Reset();
 	PendingPersistentDeploymentRecords.Reset();
+	SavedArmyPresetRecords.Reset();
+	ActiveArmyPresetIndex = 0;
 	SavedCoins = 0;
 	CachedPreviewArmyPower = 0;
 }
@@ -318,6 +395,36 @@ void UArmyBuilderWidget::NativeConstruct()
 	{
 		ShowDeploymentButton->OnClicked.RemoveDynamic(this, &UArmyBuilderWidget::HandleShowDeploymentClicked);
 		ShowDeploymentButton->OnClicked.AddDynamic(this, &UArmyBuilderWidget::HandleShowDeploymentClicked);
+	}
+
+	if (ArmyPreset1Button)
+	{
+		ArmyPreset1Button->OnClicked.RemoveDynamic(this, &UArmyBuilderWidget::HandleArmyPreset1Clicked);
+		ArmyPreset1Button->OnClicked.AddDynamic(this, &UArmyBuilderWidget::HandleArmyPreset1Clicked);
+	}
+
+	if (ArmyPreset2Button)
+	{
+		ArmyPreset2Button->OnClicked.RemoveDynamic(this, &UArmyBuilderWidget::HandleArmyPreset2Clicked);
+		ArmyPreset2Button->OnClicked.AddDynamic(this, &UArmyBuilderWidget::HandleArmyPreset2Clicked);
+	}
+
+	if (ArmyPreset3Button)
+	{
+		ArmyPreset3Button->OnClicked.RemoveDynamic(this, &UArmyBuilderWidget::HandleArmyPreset3Clicked);
+		ArmyPreset3Button->OnClicked.AddDynamic(this, &UArmyBuilderWidget::HandleArmyPreset3Clicked);
+	}
+
+	if (ArmyPreset4Button)
+	{
+		ArmyPreset4Button->OnClicked.RemoveDynamic(this, &UArmyBuilderWidget::HandleArmyPreset4Clicked);
+		ArmyPreset4Button->OnClicked.AddDynamic(this, &UArmyBuilderWidget::HandleArmyPreset4Clicked);
+	}
+
+	if (ArmyPreset5Button)
+	{
+		ArmyPreset5Button->OnClicked.RemoveDynamic(this, &UArmyBuilderWidget::HandleArmyPreset5Clicked);
+		ArmyPreset5Button->OnClicked.AddDynamic(this, &UArmyBuilderWidget::HandleArmyPreset5Clicked);
 	}
 
 	if (KingdomFactionButton)
@@ -384,6 +491,8 @@ void UArmyBuilderWidget::NativeConstruct()
 	ActiveTypeFilters.Reset();
 
 	CacheAvailableUnitClassesForBattle();
+	EnsureArmyPresetStorage();
+	LoadPresetIntoRuntime(ActiveArmyPresetIndex);
 
 	SelectedArmyUnitClasses = SavedPlayerArmyUnitClasses;
 	SelectedArmyUnitClasses.RemoveAll([](const TSubclassOf<AHexUnitActor>& UnitClass)
@@ -859,18 +968,27 @@ bool UArmyBuilderWidget::SaveArmyDeployment(const TArray<FArmyBuilderDeploymentS
 		return false;
 	}
 
-	SaveSelectedArmyForBattle();
+	// Save the composition without triggering an intermediate disk write, then attach
+	// this deployment to the same active template and persist once.
+	CommitSelectedArmyToActivePreset(false);
 	SavedPlayerArmyDeploymentSlots = NewDeploymentSlots;
+	StoreActiveRuntimeArmyInPreset();
 	RequestPersistentAccountSave();
 
-	UE_LOG(LogTemp, Log, TEXT("Army deployment saved: Units=%d."), SavedPlayerArmyDeploymentSlots.Num());
+	UE_LOG(LogTemp, Log, TEXT("Army deployment saved: Units=%d Preset=%d."),
+		SavedPlayerArmyDeploymentSlots.Num(),
+		ActiveArmyPresetIndex + 1
+	);
 	UpdateAllVisuals();
 	return true;
 }
 
 TArray<FArmyBuilderDeploymentSlot> UArmyBuilderWidget::GetCurrentSavedDeploymentSlotsForSelectedArmy() const
 {
-	if (IsDeploymentSlotListValidForArmy(SavedPlayerArmyDeploymentSlots, SelectedArmyUnitClasses.Num()))
+	// Unit indexes are meaningful only for the exact same ordered composition.
+	// A different draft with the same unit count must not inherit another template's formation.
+	if (SelectedArmyUnitClasses == SavedPlayerArmyUnitClasses &&
+		IsDeploymentSlotListValidForArmy(SavedPlayerArmyDeploymentSlots, SelectedArmyUnitClasses.Num()))
 	{
 		return SavedPlayerArmyDeploymentSlots;
 	}
@@ -1079,6 +1197,7 @@ void UArmyBuilderWidget::ClearSavedPlayerArmy()
 	SavedPlayerArmyUnitProgress.Reset();
 	SavedFactionEffectRecords.Reset();
 	CachedPreviewArmyPower = 0;
+	StoreActiveRuntimeArmyInPreset();
 }
 
 int32 UArmyBuilderWidget::GetLastPreviewArmyPower()
@@ -1167,7 +1286,8 @@ void UArmyBuilderWidget::HandleSaveArmyClicked()
 	// Rebuild cards after Save so any unconfirmed first-click upgrade preview is cancelled.
 	UpdateAllVisuals();
 
-	UE_LOG(LogTemp, Log, TEXT("Army saved: Units=%d Slots=%d/%d ReadyForBattle=%s."),
+	UE_LOG(LogTemp, Log, TEXT("Army template %d saved: Units=%d Slots=%d/%d ReadyForBattle=%s."),
+		ActiveArmyPresetIndex + 1,
 		SelectedArmyUnitClasses.Num(),
 		GetUsedArmySlots(),
 		GetEffectiveMaxArmySlots(),
@@ -1215,6 +1335,31 @@ void UArmyBuilderWidget::HandleShowDeploymentClicked()
 
 	ActiveDeploymentWidget->InitializeDeployment(this, SelectedArmyUnitClasses, GetCurrentSavedDeploymentSlotsForSelectedArmy());
 	ActiveDeploymentWidget->AddToViewport(10);
+}
+
+void UArmyBuilderWidget::HandleArmyPreset1Clicked()
+{
+	SelectArmyPreset(0);
+}
+
+void UArmyBuilderWidget::HandleArmyPreset2Clicked()
+{
+	SelectArmyPreset(1);
+}
+
+void UArmyBuilderWidget::HandleArmyPreset3Clicked()
+{
+	SelectArmyPreset(2);
+}
+
+void UArmyBuilderWidget::HandleArmyPreset4Clicked()
+{
+	SelectArmyPreset(3);
+}
+
+void UArmyBuilderWidget::HandleArmyPreset5Clicked()
+{
+	SelectArmyPreset(4);
 }
 
 void UArmyBuilderWidget::HandleKingdomFactionClicked()
@@ -1310,6 +1455,7 @@ void UArmyBuilderWidget::UpdateAllVisuals()
 	UpdateTexts();
 	UpdateButtonStates();
 	UpdateFilterVisuals();
+	UpdateArmyPresetVisuals();
 }
 
 
@@ -1707,6 +1853,45 @@ void UArmyBuilderWidget::UpdateFilterVisuals()
 	SetButtonSelectedVisual(HealerTypeButton, ActiveTypeFilters.Contains(EArmyUnitTypeFilter::Healer));
 }
 
+void UArmyBuilderWidget::UpdateArmyPresetVisuals()
+{
+	EnsureArmyPresetStorage();
+
+	UButton* PresetButtons[5] =
+	{
+		ArmyPreset1Button,
+		ArmyPreset2Button,
+		ArmyPreset3Button,
+		ArmyPreset4Button,
+		ArmyPreset5Button
+	};
+
+	for (int32 PresetIndex = 0; PresetIndex < 5; ++PresetIndex)
+	{
+		UButton* Button = PresetButtons[PresetIndex];
+		if (!Button)
+		{
+			continue;
+		}
+
+		const bool bSelected = PresetIndex == ActiveArmyPresetIndex;
+		const int32 UnitCount = bSelected
+			? SelectedArmyUnitClasses.Num()
+			: (SavedArmyPresetRecords.IsValidIndex(PresetIndex)
+				? SavedArmyPresetRecords[PresetIndex].UnitClasses.Num()
+				: 0);
+
+		Button->SetIsEnabled(true);
+		Button->SetRenderOpacity(bSelected ? SelectedArmyPresetOpacity : NormalArmyPresetOpacity);
+		Button->SetToolTipText(FText::FromString(FString::Printf(
+			TEXT("Army template %d%s. Units saved: %d."),
+			PresetIndex + 1,
+			bSelected ? TEXT(" (active)") : TEXT(""),
+			UnitCount
+		)));
+	}
+}
+
 void UArmyBuilderWidget::RefreshAvailableUnitList()
 {
 	if (!AvailableUnitsWrapBox)
@@ -1813,16 +1998,24 @@ void UArmyBuilderWidget::RefreshSelectedArmyList()
 
 void UArmyBuilderWidget::SaveSelectedArmyForBattle()
 {
+	CommitSelectedArmyToActivePreset(true);
+}
+
+void UArmyBuilderWidget::CommitSelectedArmyToActivePreset(bool bRequestPersistentSave)
+{
 	CacheAvailableUnitClassesForBattle();
 
 	// Persist the selected composition even when it is not battle-ready.
-	// IsSavedPlayerArmyReadyForBattle() remains the only gate for starting a match.
+	// Battle readiness remains a separate check on the mode-select screen.
 	NormalizeSelectedProgressForCurrentArmy();
+
+	const TArray<TSubclassOf<AHexUnitActor>> PreviousSavedComposition = SavedPlayerArmyUnitClasses;
 
 	SavedPlayerArmyUnitClasses = SelectedArmyUnitClasses;
 	SavedPlayerArmyUnitClasses.RemoveAll([](const TSubclassOf<AHexUnitActor>& UnitClass)
 		{
-			return !UnitClass;
+			UClass* UnitClassObject = UnitClass.Get();
+			return !IsValid(UnitClassObject) || !UnitClassObject->IsChildOf(AHexUnitActor::StaticClass());
 		});
 
 	SavedPlayerArmyUnitProgress = SelectedArmyUnitProgress;
@@ -1832,12 +2025,69 @@ void UArmyBuilderWidget::SaveSelectedArmyForBattle()
 	CachedPreviewArmyPower = CalculateArmyPowerForList(SavedPlayerArmyUnitClasses);
 	RebuildSavedFactionEffectRecordsFromArmy(SavedPlayerArmyUnitClasses);
 
-	if (SavedPlayerArmyDeploymentSlots.Num() > 0 && !IsDeploymentSlotListValidForArmy(SavedPlayerArmyDeploymentSlots, SavedPlayerArmyUnitClasses.Num()))
+	// A formation belongs to an exact ordered composition. Any add/remove/reorder
+	// invalidates the old formation instead of silently assigning it to other units.
+	const bool bCompositionChanged = PreviousSavedComposition != SavedPlayerArmyUnitClasses;
+	if (bCompositionChanged ||
+		(SavedPlayerArmyDeploymentSlots.Num() > 0 &&
+			!IsDeploymentSlotListValidForArmy(SavedPlayerArmyDeploymentSlots, SavedPlayerArmyUnitClasses.Num())))
 	{
 		SavedPlayerArmyDeploymentSlots.Reset();
 	}
 
+	StoreActiveRuntimeArmyInPreset();
+
+	if (bRequestPersistentSave)
+	{
+		RequestPersistentAccountSave();
+	}
+}
+
+void UArmyBuilderWidget::SelectArmyPreset(int32 NewPresetIndex)
+{
+	const int32 SafePresetIndex = FMath::Clamp(NewPresetIndex, 0, 4);
+	if (SafePresetIndex == ActiveArmyPresetIndex)
+	{
+		UpdateArmyPresetVisuals();
+		return;
+	}
+
+	// Preserve the current draft automatically before changing templates. This also
+	// allows incomplete templates (0-2 units) without forcing extra confirmation.
+	CommitSelectedArmyToActivePreset(false);
+
+	if (ActiveDeploymentWidget)
+	{
+		ActiveDeploymentWidget->RemoveFromParent();
+		ActiveDeploymentWidget = nullptr;
+	}
+
+	ActiveArmyPresetIndex = SafePresetIndex;
+	LoadPresetIntoRuntime(ActiveArmyPresetIndex);
+	LoadActivePresetIntoEditor();
+
 	RequestPersistentAccountSave();
+	UpdateAllVisuals();
+
+	UE_LOG(LogTemp, Log, TEXT("Army template selected: %d Units=%d Deployment=%d."),
+		ActiveArmyPresetIndex + 1,
+		SelectedArmyUnitClasses.Num(),
+		SavedPlayerArmyDeploymentSlots.Num()
+	);
+}
+
+void UArmyBuilderWidget::LoadActivePresetIntoEditor()
+{
+	SelectedArmyUnitClasses = SavedPlayerArmyUnitClasses;
+	SelectedArmyUnitClasses.RemoveAll([](const TSubclassOf<AHexUnitActor>& UnitClass)
+		{
+			UClass* UnitClassObject = UnitClass.Get();
+			return !IsValid(UnitClassObject) || !UnitClassObject->IsChildOf(AHexUnitActor::StaticClass());
+		});
+
+	SelectedArmyUnitProgress = SavedPlayerArmyUnitProgress;
+	NormalizeSelectedProgressForCurrentArmy();
+	StoreProgressListInRoster(SelectedArmyUnitClasses, SelectedArmyUnitProgress);
 }
 
 void UArmyBuilderWidget::RequestPersistentAccountSave() const
@@ -1887,6 +2137,222 @@ void UArmyBuilderWidget::NormalizeSelectedProgressForCurrentArmy()
 			SelectedArmyUnitProgress[Index] = KnownProgress;
 		}
 	}
+}
+
+void UArmyBuilderWidget::EnsureArmyPresetStorage()
+{
+	const bool bHadNoPresetRecords = SavedArmyPresetRecords.IsEmpty();
+
+	if (SavedArmyPresetRecords.Num() > 5)
+	{
+		SavedArmyPresetRecords.SetNum(5);
+	}
+	else
+	{
+		while (SavedArmyPresetRecords.Num() < 5)
+		{
+			SavedArmyPresetRecords.AddDefaulted();
+		}
+	}
+
+	ActiveArmyPresetIndex = FMath::Clamp(ActiveArmyPresetIndex, 0, 4);
+
+	// Session migration safety: if older code populated the legacy active army before
+	// preset data existed, preserve that army as template 1.
+	if (bHadNoPresetRecords &&
+		(!SavedPlayerArmyUnitClasses.IsEmpty() || !SavedPlayerArmyDeploymentSlots.IsEmpty()))
+	{
+		FAccountArmyPresetRecord& FirstPreset = SavedArmyPresetRecords[0];
+
+		for (const TSubclassOf<AHexUnitActor>& UnitClass : SavedPlayerArmyUnitClasses)
+		{
+			UClass* UnitClassObject = UnitClass.Get();
+			if (IsValid(UnitClassObject) && UnitClassObject->IsChildOf(AHexUnitActor::StaticClass()))
+			{
+				FirstPreset.UnitClasses.Add(TSoftClassPtr<AHexUnitActor>(UnitClassObject));
+			}
+		}
+
+		for (const FArmyBuilderDeploymentSlot& DeploymentSlot : SavedPlayerArmyDeploymentSlots)
+		{
+			FAccountDeploymentSlotRecord& Record = FirstPreset.DeploymentSlots.AddDefaulted_GetRef();
+			Record.UnitIndex = DeploymentSlot.UnitIndex;
+			Record.Q = DeploymentSlot.Q;
+			Record.R = DeploymentSlot.R;
+		}
+
+		RebuildSavedFactionEffectRecordsFromArmy(SavedPlayerArmyUnitClasses);
+		FirstPreset.FactionEffects = SavedFactionEffectRecords;
+		ActiveArmyPresetIndex = 0;
+	}
+}
+
+bool UArmyBuilderWidget::TryConvertPersistentDeployment(
+	const TArray<FAccountDeploymentSlotRecord>& Records,
+	int32 UnitCount,
+	TArray<FArmyBuilderDeploymentSlot>& OutDeploymentSlots
+)
+{
+	OutDeploymentSlots.Reset();
+
+	if (UnitCount <= 0 || Records.Num() != UnitCount)
+	{
+		return false;
+	}
+
+	TSet<int32> UsedUnitIndexes;
+	TSet<FIntPoint> UsedCoords;
+
+	for (const FAccountDeploymentSlotRecord& Record : Records)
+	{
+		if (Record.UnitIndex < 0 || Record.UnitIndex >= UnitCount)
+		{
+			OutDeploymentSlots.Reset();
+			return false;
+		}
+
+		const FIntPoint Coord(Record.Q, Record.R);
+		if (UsedUnitIndexes.Contains(Record.UnitIndex) || UsedCoords.Contains(Coord))
+		{
+			OutDeploymentSlots.Reset();
+			return false;
+		}
+
+		UsedUnitIndexes.Add(Record.UnitIndex);
+		UsedCoords.Add(Coord);
+		OutDeploymentSlots.Add(FArmyBuilderDeploymentSlot(Record.UnitIndex, Record.Q, Record.R));
+	}
+
+	return OutDeploymentSlots.Num() == UnitCount;
+}
+
+void UArmyBuilderWidget::StoreActiveRuntimeArmyInPreset()
+{
+	EnsureArmyPresetStorage();
+
+	FAccountArmyPresetRecord& ActivePreset = SavedArmyPresetRecords[ActiveArmyPresetIndex];
+	ActivePreset.UnitClasses.Reset();
+	ActivePreset.DeploymentSlots.Reset();
+
+	for (const TSubclassOf<AHexUnitActor>& UnitClass : SavedPlayerArmyUnitClasses)
+	{
+		if (ActivePreset.UnitClasses.Num() >= 5)
+		{
+			break;
+		}
+
+		UClass* UnitClassObject = UnitClass.Get();
+		if (!IsValid(UnitClassObject) || !UnitClassObject->IsChildOf(AHexUnitActor::StaticClass()))
+		{
+			continue;
+		}
+
+		ActivePreset.UnitClasses.Add(TSoftClassPtr<AHexUnitActor>(UnitClassObject));
+	}
+
+	if (SavedPlayerArmyDeploymentSlots.Num() == SavedPlayerArmyUnitClasses.Num() &&
+		!SavedPlayerArmyUnitClasses.IsEmpty())
+	{
+		TSet<int32> UsedUnitIndexes;
+		TSet<FIntPoint> UsedCoords;
+		bool bValidDeployment = true;
+
+		for (const FArmyBuilderDeploymentSlot& DeploymentSlot : SavedPlayerArmyDeploymentSlots)
+		{
+			const FIntPoint Coord(DeploymentSlot.Q, DeploymentSlot.R);
+			if (DeploymentSlot.UnitIndex < 0 ||
+				DeploymentSlot.UnitIndex >= SavedPlayerArmyUnitClasses.Num() ||
+				UsedUnitIndexes.Contains(DeploymentSlot.UnitIndex) ||
+				UsedCoords.Contains(Coord))
+			{
+				bValidDeployment = false;
+				break;
+			}
+
+			UsedUnitIndexes.Add(DeploymentSlot.UnitIndex);
+			UsedCoords.Add(Coord);
+
+			FAccountDeploymentSlotRecord& Record = ActivePreset.DeploymentSlots.AddDefaulted_GetRef();
+			Record.UnitIndex = DeploymentSlot.UnitIndex;
+			Record.Q = DeploymentSlot.Q;
+			Record.R = DeploymentSlot.R;
+		}
+
+		if (!bValidDeployment)
+		{
+			ActivePreset.DeploymentSlots.Reset();
+		}
+	}
+
+	// Composition is authoritative. Store a fresh snapshot so every template keeps
+	// the faction effects matching its own units even after balance-rule changes.
+	RebuildSavedFactionEffectRecordsFromArmy(SavedPlayerArmyUnitClasses);
+	ActivePreset.FactionEffects = SavedFactionEffectRecords;
+}
+
+void UArmyBuilderWidget::LoadPresetIntoRuntime(int32 PresetIndex)
+{
+	EnsureArmyPresetStorage();
+	ActiveArmyPresetIndex = FMath::Clamp(PresetIndex, 0, 4);
+
+	SavedPlayerArmyUnitClasses.Reset();
+	SavedPlayerArmyDeploymentSlots.Reset();
+	SavedPlayerArmyUnitProgress.Reset();
+	SavedFactionEffectRecords.Reset();
+
+	const FAccountArmyPresetRecord& Preset = SavedArmyPresetRecords[ActiveArmyPresetIndex];
+
+	for (const TSoftClassPtr<AHexUnitActor>& SoftUnitClass : Preset.UnitClasses)
+	{
+		if (SavedPlayerArmyUnitClasses.Num() >= 5)
+		{
+			break;
+		}
+
+		UClass* LoadedClass = SoftUnitClass.LoadSynchronous();
+		if (!IsValid(LoadedClass) || !LoadedClass->IsChildOf(AHexUnitActor::StaticClass()))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Army template %d skipped missing unit class: %s"),
+				ActiveArmyPresetIndex + 1,
+				*SoftUnitClass.ToSoftObjectPath().ToString()
+			);
+			continue;
+		}
+
+		SavedPlayerArmyUnitClasses.Add(LoadedClass);
+	}
+
+	for (const TSubclassOf<AHexUnitActor>& UnitClass : SavedPlayerArmyUnitClasses)
+	{
+		SavedPlayerArmyUnitProgress.Add(MakeProgressForAddedUnit(UnitClass));
+	}
+	NormalizeProgressListForArmy(SavedPlayerArmyUnitClasses, SavedPlayerArmyUnitProgress);
+
+	TryConvertPersistentDeployment(
+		Preset.DeploymentSlots,
+		SavedPlayerArmyUnitClasses.Num(),
+		SavedPlayerArmyDeploymentSlots
+	);
+
+	RebuildSavedFactionEffectRecordsFromArmy(SavedPlayerArmyUnitClasses);
+
+	CachedPreviewArmyPower = 0;
+	for (int32 Index = 0; Index < SavedPlayerArmyUnitClasses.Num(); ++Index)
+	{
+		const AHexUnitActor* DefaultUnit = SavedPlayerArmyUnitClasses[Index]
+			? SavedPlayerArmyUnitClasses[Index]->GetDefaultObject<AHexUnitActor>()
+			: nullptr;
+
+		if (DefaultUnit && SavedPlayerArmyUnitProgress.IsValidIndex(Index))
+		{
+			CachedPreviewArmyPower += DefaultUnit->GetArmyPowerValueForLevel(
+				SavedPlayerArmyUnitProgress[Index].Level
+			);
+		}
+	}
+
+	// Sanitize the soft record after loading (missing classes/invalid deployment are removed).
+	StoreActiveRuntimeArmyInPreset();
 }
 
 void UArmyBuilderWidget::NormalizeProgressListForArmy(const TArray<TSubclassOf<AHexUnitActor>>& ArmyClasses, TArray<FArmyBuilderUnitProgress>& ProgressList)

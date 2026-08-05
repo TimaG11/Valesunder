@@ -259,6 +259,9 @@ public:
 	static void ImportPersistentFactionEffects(const TArray<FAccountFactionEffectRecord>& Records);
 	static void ExportPersistentDeployment(TArray<FAccountDeploymentSlotRecord>& OutRecords);
 	static void ImportPersistentDeployment(const TArray<FAccountDeploymentSlotRecord>& Records);
+	static void ExportPersistentArmyPresets(TArray<FAccountArmyPresetRecord>& OutPresets, int32& OutActivePresetIndex);
+	static void ImportPersistentArmyPresets(const TArray<FAccountArmyPresetRecord>& Presets, int32 InActivePresetIndex);
+	static int32 GetActiveArmyPresetIndex();
 	static void ResetSessionAccountState();
 
 protected:
@@ -275,6 +278,23 @@ protected:
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	UButton* ShowDeploymentButton = nullptr;
+
+	// Five reusable army-template buttons in the lower-left corner.
+	// Create these buttons in WBP_ArmyBuilder with the exact names below.
+	UPROPERTY(meta = (BindWidgetOptional))
+	UButton* ArmyPreset1Button = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UButton* ArmyPreset2Button = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UButton* ArmyPreset3Button = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UButton* ArmyPreset4Button = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UButton* ArmyPreset5Button = nullptr;
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	UButton* KingdomFactionButton = nullptr;
@@ -435,6 +455,12 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Army Builder|Visual", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float NormalFilterOpacity = 0.55f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Army Builder|Army Presets|Visual", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SelectedArmyPresetOpacity = 1.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Army Builder|Army Presets|Visual", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float NormalArmyPresetOpacity = 0.55f;
+
 	UFUNCTION()
 	void HandleMainMenuClicked();
 
@@ -446,6 +472,21 @@ protected:
 
 	UFUNCTION()
 	void HandleShowDeploymentClicked();
+
+	UFUNCTION()
+	void HandleArmyPreset1Clicked();
+
+	UFUNCTION()
+	void HandleArmyPreset2Clicked();
+
+	UFUNCTION()
+	void HandleArmyPreset3Clicked();
+
+	UFUNCTION()
+	void HandleArmyPreset4Clicked();
+
+	UFUNCTION()
+	void HandleArmyPreset5Clicked();
 
 	UFUNCTION()
 	void HandleKingdomFactionClicked();
@@ -505,6 +546,12 @@ private:
 	static TArray<FAccountFactionEffectRecord> SavedFactionEffectRecords;
 	static TArray<FAccountDeploymentSlotRecord> PendingPersistentDeploymentRecords;
 
+	// Soft references keep all five inactive templates stable without relying on
+	// process-memory UClass pointers. The active template is mirrored into the
+	// existing SavedPlayerArmy* arrays used by battle code.
+	static TArray<FAccountArmyPresetRecord> SavedArmyPresetRecords;
+	static int32 ActiveArmyPresetIndex;
+
 	UPROPERTY()
 	UArmyDeploymentWidget* ActiveDeploymentWidget = nullptr;
 
@@ -522,6 +569,7 @@ private:
 	void UpdateTexts();
 	void UpdateButtonStates();
 	void UpdateFilterVisuals();
+	void UpdateArmyPresetVisuals();
 	void RefreshFactionEffectIcons();
 	int32 CountSelectedUnitsForFactionEffect(EHexUnitFaction Faction, EArmyFactionEffectRole Role) const;
 	static bool DoesUnitMatchFactionEffectRole(const AHexUnitActor* Unit, EArmyFactionEffectRole Role);
@@ -529,11 +577,22 @@ private:
 	void RefreshAvailableUnitList();
 	void RefreshSelectedArmyList();
 	void SaveSelectedArmyForBattle();
+	void CommitSelectedArmyToActivePreset(bool bRequestPersistentSave);
+	void SelectArmyPreset(int32 NewPresetIndex);
+	void LoadActivePresetIntoEditor();
 	void RequestPersistentAccountSave() const;
 	void CacheAvailableUnitClassesForBattle();
 	void NormalizeSelectedProgressForCurrentArmy();
 
 	static bool IsArmyClassListReadyForBattle(const TArray<TSubclassOf<AHexUnitActor>>& ArmyClasses);
+	static void EnsureArmyPresetStorage();
+	static void StoreActiveRuntimeArmyInPreset();
+	static void LoadPresetIntoRuntime(int32 PresetIndex);
+	static bool TryConvertPersistentDeployment(
+		const TArray<FAccountDeploymentSlotRecord>& Records,
+		int32 UnitCount,
+		TArray<FArmyBuilderDeploymentSlot>& OutDeploymentSlots
+	);
 	static void NormalizeProgressListForArmy(const TArray<TSubclassOf<AHexUnitActor>>& ArmyClasses, TArray<FArmyBuilderUnitProgress>& ProgressList);
 	static void AddExperienceToProgress(FArmyBuilderUnitProgress& Progress, int32 ExperienceToAdd);
 	static float GetOutcomeExperienceMultiplier(EArmyBattleExperienceOutcome Outcome);
