@@ -21,6 +21,10 @@ Saved/
 *.log
 UpgradeLog*.htm
 
+# Offline bot-training Python cache
+__pycache__/
+*.py[cod]
+
 # OS junk
 .DS_Store
 Thumbs.db

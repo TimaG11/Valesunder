@@ -1,0 +1,93 @@
+{
+  "seed": 1592594996,
+  "algorithm": "fitted_monte_carlo_policy_iteration",
+  "target_source": "C++ rules-engine rollouts versus stronger deterministic greedy; no hand-written teacher labels",
+  "dataset_sha256": "114686cb39412d02c48bd4b17ff24b512152123bbf8cf9a4071a4dc923d8264b",
+  "dataset_metadata": {
+    "target_source": "monte_carlo_rl_vs_greedy_returns",
+    "seed": 1592594996,
+    "rollouts_per_action": 3,
+    "candidate_cap": 10,
+    "workers": 6,
+    "rollout_half_turn_cap": "max(24, topology_diameter * 2 + total_units)",
+    "non_terminal_target": "normalized_remaining_material_in_[-0.95,0.95]",
+    "opponent": "deterministic_greedy",
+    "greedy_health_multiplier": 1.12,
+    "greedy_damage_multiplier": 1.08,
+    "training": {
+      "positions": 800,
+      "policy_rows": 7846,
+      "value_rows": 1600,
+      "rollouts": 23538,
+      "map_span": [
+        3,
+        7
+      ],
+      "units_per_team": [
+        2,
+        9
+      ]
+    },
+    "structural_holdout": {
+      "positions": 200,
+      "policy_rows": 1983,
+      "value_rows": 400,
+      "rollouts": 5949,
+      "map_span": [
+        8,
+        12
+      ],
+      "units_per_team": [
+        10,
+        18
+      ]
+    }
+  },
+  "parameters": 1666,
+  "selection_validation": {
+    "policy": {
+      "best_epoch": 4,
+      "epochs_requested": 100,
+      "validation_objective_at_selection": 0.3980733022093773,
+      "rows": 776,
+      "positions": 80,
+      "top1_action_agreement": 0.3,
+      "mean_top1_return_regret": 0.14005086310207843,
+      "pairwise_ordering_accuracy_margin_0_05": 0.4752851711026616,
+      "evaluated_action_pairs": 526
+    },
+    "value": {
+      "best_epoch": 100,
+      "epochs_requested": 100,
+      "validation_objective_at_selection": 0.27060309052467346,
+      "rows": 160,
+      "groups": 80,
+      "mae": 0.27060309052467346,
+      "rmse": 0.48115256428718567,
+      "pearson_correlation": 0.8611322641372681,
+      "decisive_outcome_sign_accuracy": 0.8734177350997925,
+      "decisive_rows": 158
+    }
+  },
+  "structural_holdout": {
+    "note": "never used for gradients or early stopping; larger maps, armies, stat and rule ranges",
+    "policy": {
+      "rows": 1983,
+      "positions": 200,
+      "top1_action_agreement": 0.195,
+      "mean_top1_return_regret": 0.20322008171584457,
+      "pairwise_ordering_accuracy_margin_0_05": 0.5404998494429388,
+      "evaluated_action_pairs": 3321
+    },
+    "value": {
+      "rows": 400,
+      "groups": 200,
+      "mae": 0.40403446555137634,
+      "rmse": 0.5726126432418823,
+      "pearson_correlation": 0.714532196521759,
+      "decisive_outcome_sign_accuracy": 0.7988505959510803,
+      "decisive_rows": 348
+    }
+  },
+  "weights_sha256": "394d82bd3b045a2fefb1f5e586a75a6523f05e90bd5e0910a23936122ad24f96"
+}

@@ -1,0 +1,19 @@
+{
+  "seed": 1592594996,
+  "matches": 10000,
+  "improved_win_rate": 84.2500,
+  "legacy_win_rate": 15.7500,
+  "draw_rate": 0.0000,
+  "improved_win_rate_95pct_lower_bound": 83.5229,
+  "improved_win_rate_as_first_side": 88.8400,
+  "improved_win_rate_as_second_side": 79.6600,
+  "improved_avg_remaining_hp": 184.3908,
+  "legacy_avg_remaining_hp": 26.5231,
+  "improved_avg_damage": 549.0049,
+  "legacy_avg_damage": 499.5340,
+  "average_full_turns": 9.0130,
+  "improved_move_to_kill_setups": 18358,
+  "legacy_move_to_kill_setups": 0,
+  "improved_forced_kill_conversion": 70.7231,
+  "legacy_forced_kill_conversion": 56.9438
+}

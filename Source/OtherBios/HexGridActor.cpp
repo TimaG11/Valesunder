@@ -1,6 +1,8 @@
 // SUPPORT HEALER NEW v3 - generated 2026-06-20, contains bCanHeal/HealAmount/HealMontage and InHealAmount fix
 #include "HexGridActor.h"
 
+#include "HexBotDecisionModel.h"
+#include "HexBotNeuralPlanner.h"
 #include "HexUnitActor.h"
 #include "HexAttackProjectile.h"
 #include "ArmyBuilderWidget.h"
@@ -43,6 +45,29 @@ namespace
 	constexpr int32 ExactPhotoCellBase = 200000;
 	constexpr int32 LegacyPhotoDeploymentCoordBase = 100000;
 	constexpr int32 LegacyPhotoDeploymentCoordScale = 10000;
+
+	OtherBios::BotAI::EDifficulty ToDecisionDifficulty(EHexBotDifficulty Difficulty)
+	{
+		switch (Difficulty)
+		{
+		case EHexBotDifficulty::WarmUp:
+			return OtherBios::BotAI::EDifficulty::WarmUp;
+		case EHexBotDifficulty::Challenge:
+			return OtherBios::BotAI::EDifficulty::Challenge;
+		case EHexBotDifficulty::Ordeal:
+			return OtherBios::BotAI::EDifficulty::Ordeal;
+		case EHexBotDifficulty::Nightmare:
+		default:
+			return OtherBios::BotAI::EDifficulty::Nightmare;
+		}
+	}
+
+	uint32 MakeEnemyBotStableCellKey(const FIntPoint& Coord)
+	{
+		const uint32 Q = static_cast<uint32>(Coord.X + 32768) & 0xffffu;
+		const uint32 R = static_cast<uint32>(Coord.Y + 32768) & 0xffffu;
+		return (Q << 16u) | R;
+	}
 
 	bool DecodeExactPhotoCell(int32 EncodedQ, int32 EncodedR, int32& OutColumn, int32& OutRow)
 	{
@@ -206,27 +231,6 @@ float AHexGridActor::GetEnemyBotDifficultyKillScoreScale() const
 
 	default:
 		return 1.00f;
-	}
-}
-
-float AHexGridActor::GetEnemyBotDifficultyMistakeChance() const
-{
-	switch (EnemyBotDifficulty)
-	{
-	case EHexBotDifficulty::WarmUp:
-		return 0.28f;
-
-	case EHexBotDifficulty::Challenge:
-		return 0.10f;
-
-	case EHexBotDifficulty::Ordeal:
-		return 0.03f;
-
-	case EHexBotDifficulty::Nightmare:
-		return 0.0f;
-
-	default:
-		return 0.05f;
 	}
 }
 
@@ -430,12 +434,6 @@ float AHexGridActor::GetEnemyBotFactionMoveBonus(AHexUnitActor* EnemyUnit, const
 	}
 
 	return Bonus;
-}
-
-bool AHexGridActor::ShouldEnemyBotMakeDifficultyMistake(float ChanceMultiplier) const
-{
-	const float Chance = FMath::Clamp(GetEnemyBotDifficultyMistakeChance() * FMath::Max(0.0f, ChanceMultiplier), 0.0f, 1.0f);
-	return Chance > 0.0f && FMath::FRand() < Chance;
 }
 
 int32 AHexGridActor::GetEnemyBotPlanningDepth() const
@@ -8721,7 +8719,59 @@ void AHexGridActor::RunEnemyBotTurn()
 		return;
 	}
 
-	// 3. PRE-EMPTIVE REINFORCEMENT.
+	// 3. A guaranteed move -> kill is stronger than an unrelated chip attack.
+	// The previous fixed action ladder always fired any available shot first and could spend
+	// the shared AP that another unit needed to finish a target. Evaluate these tactical
+	// sequences before ordinary attacks; after the move the next planner pass performs the kill.
+	AHexUnitActor* BestMoveKiller = nullptr;
+	FIntPoint BestMoveKillCoord = FIntPoint::ZeroValue;
+	TArray<FHexCoord> BestMoveKillPath;
+	float BestMoveKillScore = -1000000000.0f;
+	for (AHexUnitActor* Unit : EnemyBotUnits)
+	{
+		if (!IsValid(Unit) || Unit->GetIsDead() || !Unit->CanAct() || !CanUnitAttackThisTurn(Unit))
+		{
+			continue;
+		}
+
+		FIntPoint CandidateCoord = FIntPoint::ZeroValue;
+		TArray<FHexCoord> CandidatePath;
+		float CandidateScore = -1000000000.0f;
+		if (!FindBestEnemyBotMove(Unit, CandidateCoord, CandidatePath, &CandidateScore) || CandidatePath.IsEmpty())
+		{
+			continue;
+		}
+
+		bool bCanKillAfterMove = false;
+		const bool bCreatesAttack = CanEnemyBotAttackAnyPlayerFromCell(Unit, CandidateCoord, &bCanKillAfterMove);
+		const int32 MoveCost = CalculateMoveActionPointCost(CandidatePath.Num());
+		if (!bCreatesAttack || !bCanKillAfterMove ||
+			CurrentActionPoints < MoveCost + CalculateAttackActionPointCost())
+		{
+			continue;
+		}
+
+		const float SequenceScore = CandidateScore + EnemyBotMoveIntoAttackBonus + EnemyBotExecuteKillBonus * 2.0f;
+		if (SequenceScore > BestMoveKillScore)
+		{
+			BestMoveKillScore = SequenceScore;
+			BestMoveKiller = Unit;
+			BestMoveKillCoord = CandidateCoord;
+			BestMoveKillPath = MoveTemp(CandidatePath);
+		}
+	}
+
+	if (IsValid(BestMoveKiller) && !BestMoveKillPath.IsEmpty())
+	{
+		UE_LOG(LogTemp, Log, TEXT("Enemy bot selected move-to-kill sequence: Unit=%s Score=%.1f AP=%d"),
+			*GetNameSafe(BestMoveKiller), BestMoveKillScore, CurrentActionPoints);
+		if (ExecuteEnemyBotMove(BestMoveKiller, BestMoveKillCoord, BestMoveKillPath))
+		{
+			return;
+		}
+	}
+
+	// 4. PRE-EMPTIVE REINFORCEMENT.
 	// If a frontline engagement is forecast to be losing at FULL-health assumptions,
 	// spend one action pulling in a free unit that currently has no player in attack range.
 	// We still reserve AP for one already-available attack, so this does not turn into
@@ -8834,26 +8884,37 @@ void AHexGridActor::RunEnemyBotTurn()
 		}
 	}
 
-	// 4. If ANY unit can attack now, attack now. The move->attack rule still applies,
-	// but only after the AI has secured a forecasted losing flank with an idle helper.
-	if (AHexUnitActor* Attacker = FindBestImmediateAttacker(false))
+	// Champion abilities are not approximated by the compact simulator yet. Preserve their
+	// audited C++ rules when there is no normal attack, then let neural-guided search choose
+	// between all ordinary attacks/heals/moves for the whole current board.
+	AHexUnitActor* ImmediateAttacker = FindBestImmediateAttacker(false);
+	if (!IsValid(ImmediateAttacker))
 	{
-		if (TryEnemyBotAttack(Attacker))
+		for (AHexUnitActor* Unit : EnemyBotUnits)
+		{
+			if (TryEnemyBotChampionAbility(Unit))
+			{
+				return;
+			}
+		}
+	}
+
+	if (TryEnemyBotNeuralPlannerAction())
+	{
+		return;
+	}
+
+	// Safe fallback when the model is disabled, out of budget before finding a legal action,
+	// or when the real board invalidates the snapshot between planning and execution.
+	if (IsValid(ImmediateAttacker))
+	{
+		if (TryEnemyBotAttack(ImmediateAttacker))
 		{
 			return;
 		}
 	}
 
-	// 5. With no current attack, use a champion ability only if its existing tactical rules approve it.
-	for (AHexUnitActor* Unit : EnemyBotUnits)
-	{
-		if (TryEnemyBotChampionAbility(Unit))
-		{
-			return;
-		}
-	}
-
-	// 6. Useful normal healing before spending AP on another positional move.
+	// 7. Useful normal healing before spending AP on another positional move.
 	AHexUnitActor* BestHealer = nullptr;
 	float BestHealScore = -1000000000.0f;
 	for (AHexUnitActor* Unit : EnemyBotUnits)
@@ -8876,7 +8937,7 @@ void AHexGridActor::RunEnemyBotTurn()
 		return;
 	}
 
-	// 7. Pick ONE best movement for the whole army. Moves that create an immediate attack and
+	// 8. Pick ONE best movement for the whole army. Moves that create an immediate attack and
 	// leave enough AP for that attack receive a dominant bonus. This prevents spending the turn
 	// moving several pieces while a first mover is already ready to contribute damage.
 	AHexUnitActor* BestMover = nullptr;
@@ -9051,11 +9112,12 @@ AHexUnitActor* AHexGridActor::FindBestEnemyBotAttackTarget(AHexUnitActor* EnemyU
 		return nullptr;
 	}
 
-	AHexUnitActor* BestTarget = nullptr;
-	float BestScore = -1000000000.0f;
-
 	TArray<AHexUnitActor*> PlayerUnits;
 	CollectAlivePlayerUnits(PlayerUnits);
+	TArray<AHexUnitActor*> CandidateTargets;
+	TArray<OtherBios::BotAI::FDecisionOption> DecisionOptions;
+	CandidateTargets.Reserve(PlayerUnits.Num());
+	DecisionOptions.Reserve(PlayerUnits.Num());
 
 	const FIntPoint EnemyCoord = EnemyUnit->GetGridCoord();
 
@@ -9074,15 +9136,32 @@ AHexUnitActor* AHexGridActor::FindBestEnemyBotAttackTarget(AHexUnitActor* EnemyU
 			continue;
 		}
 
-		const float Score = ScoreEnemyBotAttackTarget(EnemyUnit, PlayerUnit);
-		if (Score > BestScore)
-		{
-			BestScore = Score;
-			BestTarget = PlayerUnit;
-		}
+		const bool bCanKill = PlayerUnit->GetModifiedIncomingDamage(EnemyUnit->AttackDamage) >= PlayerUnit->CurrentHealth;
+		OtherBios::BotAI::FDecisionOption Option;
+		Option.Utility = ScoreEnemyBotAttackTarget(EnemyUnit, PlayerUnit) / 1000.0f;
+		Option.bSecuresKill = bCanKill;
+		Option.bTerminalOutcome = bCanKill && PlayerUnits.Num() <= 1;
+		Option.StableKey = MakeEnemyBotStableCellKey(PlayerCoord);
+		CandidateTargets.Add(PlayerUnit);
+		DecisionOptions.Add(Option);
 	}
 
-	return BestTarget;
+	if (CandidateTargets.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	const size_t SelectedIndex = OtherBios::BotAI::FDecisionModel::SelectIndex(
+		DecisionOptions.GetData(),
+		static_cast<size_t>(DecisionOptions.Num()),
+		ToDecisionDifficulty(EnemyBotDifficulty),
+		FMath::FRand(),
+		FMath::Max(0.0f, EnemyBotDecisionTemperatureScale)
+	);
+
+	return SelectedIndex < static_cast<size_t>(CandidateTargets.Num())
+		? CandidateTargets[static_cast<int32>(SelectedIndex)]
+		: nullptr;
 }
 
 float AHexGridActor::ScoreEnemyBotAttackTarget(AHexUnitActor* EnemyUnit, AHexUnitActor* Target) const
@@ -9180,10 +9259,37 @@ float AHexGridActor::ScoreEnemyBotAttackTarget(AHexUnitActor* EnemyUnit, AHexUni
 		}
 	}
 
-	if (ShouldEnemyBotMakeDifficultyMistake(0.50f))
-	{
-		Score += FMath::FRandRange(-420.0f, 120.0f);
-	}
+
+	int32 ProjectedIncomingDamage = 0;
+	IsCellThreatenedByPlayerUnitsAfterMove(EnemyCoord.X, EnemyCoord.Y, ProjectedIncomingDamage);
+	const int32 DesiredAttackers = FMath::Max(1, GetDesiredEnemyBotAttackersForTarget(Target));
+	const int32 OtherAttackers = CountEnemyBotAttackersThreateningPlayerTarget(Target, 0, EnemyUnit);
+	const int32 EffectiveDamage = FMath::Min(
+		Target->CurrentHealth,
+		Target->GetModifiedIncomingDamage(EnemyUnit->AttackDamage)
+	);
+
+	OtherBios::BotAI::FDecisionFeatures DecisionFeatures;
+	DecisionFeatures.Action = OtherBios::BotAI::EActionKind::Attack;
+	DecisionFeatures.BaseUtility = Score / 4000.0f;
+	DecisionFeatures.ImmediateGain = static_cast<float>(FMath::Max(0, EffectiveDamage)) /
+		static_cast<float>(FMath::Max(1, Target->CurrentHealth));
+	DecisionFeatures.TargetValue = GetEnemyBotUnitBoardValue(Target) / 1800.0f;
+	DecisionFeatures.PlanAlignment = EnemyBotPlannedFocusTarget.Get() == Target ? 1.0f : 0.0f;
+	DecisionFeatures.FutureGain = static_cast<float>(FMath::Min(OtherAttackers + 1, DesiredAttackers)) /
+		static_cast<float>(DesiredAttackers);
+	DecisionFeatures.Exposure = static_cast<float>(FMath::Max(0, ProjectedIncomingDamage)) /
+		static_cast<float>(FMath::Max(1, EnemyUnit->CurrentHealth));
+	DecisionFeatures.ResourceCost = static_cast<float>(FMath::Max(0, CalculateAttackActionPointCost())) /
+		static_cast<float>(FMath::Max(1, MaxActionPoints));
+	DecisionFeatures.Overcommit = static_cast<float>(FMath::Max(0, OtherAttackers - DesiredAttackers + 1)) / 3.0f;
+	DecisionFeatures.bSecuresKill = bCanKill;
+	DecisionFeatures.bTerminalOutcome = bCanKill && GetAliveUnitCountForTeam(EHexUnitTeam::Player) <= 1;
+
+	Score += OtherBios::BotAI::FDecisionModel::Evaluate(
+		DecisionFeatures,
+		ToDecisionDifficulty(EnemyBotDifficulty)
+	) * FMath::Max(0.0f, EnemyBotDecisionModelWeight);
 
 	return Score;
 }
@@ -9578,6 +9684,8 @@ float AHexGridActor::ScoreEnemyBotMoveCell(AHexUnitActor* EnemyUnit, const FIntP
 	const bool bEffectiveLowHealth = bLowHealth && (!bBacklineSafeBehindFront || HealthPercent <= EffectiveRetreatHealthPercent * 0.65f);
 
 	float BestTargetScore = -1000000000.0f;
+	float BestDecisionTargetValue = 0.0f;
+	float BestDecisionImmediateGain = 0.0f;
 	int32 NearestPlayerDistance = MAX_int32;
 	bool bCanAttackFromCandidate = false;
 	bool bCanKillFromCandidate = false;
@@ -9660,7 +9768,18 @@ float AHexGridActor::ScoreEnemyBotMoveCell(AHexUnitActor* EnemyUnit, const FIntP
 			TargetScore -= static_cast<float>(Distance) * (bRangedUnit ? 6.0f : 18.0f);
 		}
 
-		BestTargetScore = FMath::Max(BestTargetScore, TargetScore);
+		if (TargetScore > BestTargetScore)
+		{
+			BestTargetScore = TargetScore;
+			BestDecisionTargetValue = GetEnemyBotUnitBoardValue(PlayerUnit) / 1800.0f;
+			const int32 EffectiveDamage = FMath::Min(
+				PlayerUnit->CurrentHealth,
+				PlayerUnit->GetModifiedIncomingDamage(EnemyUnit->AttackDamage)
+			);
+			BestDecisionImmediateGain = bCandidateCanAttackTarget
+				? static_cast<float>(FMath::Max(0, EffectiveDamage)) / static_cast<float>(FMath::Max(1, PlayerUnit->CurrentHealth))
+				: 0.0f;
+		}
 	}
 
 	if (NearestPlayerDistance == MAX_int32)
@@ -9851,42 +9970,50 @@ float AHexGridActor::ScoreEnemyBotMoveCell(AHexUnitActor* EnemyUnit, const FIntP
 
 	Score += GetEnemyBotFactionMoveBonus(EnemyUnit, CandidateCoord, NearestPlayerDistance, bCanAttackFromCandidate);
 
-	if (ShouldEnemyBotMakeDifficultyMistake(0.65f))
+	const FIntPoint CurrentCoord = EnemyUnit->GetGridCoord();
+	const int32 ProgressSteps = CurrentNearestPlayerDistance == MAX_int32
+		? 0
+		: FMath::Max(0, CurrentNearestPlayerDistance - NearestPlayerDistance);
+	const int32 MovePointCost = CalculateMoveActionPointCost(PathLength);
+	const bool bLeavesAttackAP = bCanAttackFromCandidate && CanUnitAttackThisTurn(EnemyUnit) &&
+		CurrentActionPoints >= MovePointCost + CalculateAttackActionPointCost();
+	const bool bSecuresKillAfterMove = bCanKillFromCandidate && bLeavesAttackAP;
+
+	float PlanAlignment = 0.0f;
+	if (AHexUnitActor* FocusTarget = EnemyBotPlannedFocusTarget.Get(); IsValid(FocusTarget) && !FocusTarget->GetIsDead())
 	{
-		Score += FMath::FRandRange(-480.0f, 160.0f);
+		const FIntPoint FocusCoord = FocusTarget->GetGridCoord();
+		const int32 CurrentFocusDistance = GetHexDistance(CurrentCoord.X, CurrentCoord.Y, FocusCoord.X, FocusCoord.Y);
+		const int32 CandidateFocusDistance = GetHexDistance(CandidateCoord.X, CandidateCoord.Y, FocusCoord.X, FocusCoord.Y);
+		PlanAlignment = CandidateFocusDistance <= CurrentFocusDistance
+			? 1.0f
+			: 1.0f / static_cast<float>(CandidateFocusDistance - CurrentFocusDistance + 1);
 	}
 
-	if (EnemyBotRandomScoreJitter > 0.0f)
-	{
-		float JitterMultiplier = 1.0f;
-		switch (EnemyBotDifficulty)
-		{
-		case EHexBotDifficulty::WarmUp:
-			JitterMultiplier = 4.0f;
-			break;
+	OtherBios::BotAI::FDecisionFeatures DecisionFeatures;
+	DecisionFeatures.Action = OtherBios::BotAI::EActionKind::Move;
+	DecisionFeatures.BaseUtility = Score / 6000.0f;
+	DecisionFeatures.ImmediateGain = bLeavesAttackAP ? BestDecisionImmediateGain : 0.0f;
+	DecisionFeatures.TargetValue = BestDecisionTargetValue;
+	DecisionFeatures.PlanAlignment = PlanAlignment;
+	DecisionFeatures.FutureGain = bLeavesAttackAP
+		? 1.0f
+		: static_cast<float>(ProgressSteps) / static_cast<float>(FMath::Max(1, EnemyUnit->MovementRange));
+	DecisionFeatures.PositionProgress = static_cast<float>(ProgressSteps) /
+		static_cast<float>(FMath::Max(1, EnemyUnit->MovementRange));
+	DecisionFeatures.Cohesion = static_cast<float>(FMath::Min(2, GetEnemyAllyCountNearCell(CandidateCoord, 2, EnemyUnit))) / 2.0f;
+	DecisionFeatures.Exposure = static_cast<float>(FMath::Max(CurrentThreatDamage, FutureThreatDamage)) /
+		static_cast<float>(FMath::Max(1, EnemyUnit->CurrentHealth));
+	DecisionFeatures.ResourceCost = static_cast<float>(FMath::Max(0, MovePointCost)) /
+		static_cast<float>(FMath::Max(1, MaxActionPoints));
+	DecisionFeatures.Overcommit = static_cast<float>(FMath::Max(0, GetEnemyAllyCountNearCell(CandidateCoord, 1, EnemyUnit) - 2)) / 3.0f;
+	DecisionFeatures.bSecuresKill = bSecuresKillAfterMove;
+	DecisionFeatures.bTerminalOutcome = bSecuresKillAfterMove && GetAliveUnitCountForTeam(EHexUnitTeam::Player) <= 1;
 
-		case EHexBotDifficulty::Challenge:
-			JitterMultiplier = 1.0f;
-			break;
-
-		case EHexBotDifficulty::Ordeal:
-			JitterMultiplier = 0.35f;
-			break;
-
-		case EHexBotDifficulty::Nightmare:
-			JitterMultiplier = 0.0f;
-			break;
-
-		default:
-			JitterMultiplier = 1.0f;
-			break;
-		}
-
-		if (JitterMultiplier > 0.0f)
-		{
-			Score += FMath::FRandRange(0.0f, EnemyBotRandomScoreJitter * JitterMultiplier);
-		}
-	}
+	Score += OtherBios::BotAI::FDecisionModel::Evaluate(
+		DecisionFeatures,
+		ToDecisionDifficulty(EnemyBotDifficulty)
+	) * FMath::Max(0.0f, EnemyBotDecisionModelWeight);
 
 	return Score;
 }
@@ -10049,9 +10176,16 @@ bool AHexGridActor::FindBestEnemyBotMove(AHexUnitActor* EnemyUnit, FIntPoint& Ou
 		return false;
 	}
 
-	float BestScore = -1000000000.0f;
-	FIntPoint BestTargetCoord = StartCoord;
-	TArray<FHexCoord> BestPath;
+	struct FScoredMoveCandidate
+	{
+		FIntPoint TargetCoord = FIntPoint::ZeroValue;
+		TArray<FHexCoord> Path;
+		float Score = -1000000000.0f;
+		OtherBios::BotAI::FDecisionOption DecisionOption;
+	};
+
+	TArray<FScoredMoveCandidate> ScoredCandidates;
+	ScoredCandidates.Reserve(ReachableCells.Num());
 
 	for (const FHexCoord& CandidateHex : ReachableCells)
 	{
@@ -10070,11 +10204,6 @@ bool AHexGridActor::FindBestEnemyBotMove(AHexUnitActor* EnemyUnit, FIntPoint& Ou
 
 		const int32 MovePointCost = CalculateMoveActionPointCost(CandidatePath.Num());
 		if (!HasEnoughActionPoints(MovePointCost))
-		{
-			continue;
-		}
-
-		if (ReservedActionPointsForUnactedAllies > 0 && MovePointCost > CurrentActionPoints - ReservedActionPointsForUnactedAllies)
 		{
 			continue;
 		}
@@ -10139,6 +10268,13 @@ bool AHexGridActor::FindBestEnemyBotMove(AHexUnitActor* EnemyUnit, FIntPoint& Ou
 			IsValid(FindBestEnemyBotHealTargetFromCell(EnemyUnit, CandidateCoord, nullptr)) &&
 			CurrentActionPoints >= MovePointCost + CalculateHealActionPointCost(EnemyUnit);
 		const bool bFormationRetreat = IsMeaningfulEnemyBotRetreat(EnemyUnit, CandidateCoord);
+		const bool bForcedMoveKill = bFormationCanKillAfterMove && bFormationLeavesAttackAP;
+		if (ReservedActionPointsForUnactedAllies > 0 &&
+			MovePointCost > CurrentActionPoints - ReservedActionPointsForUnactedAllies &&
+			!bForcedMoveKill)
+		{
+			continue;
+		}
 
 		const FEnemyFormationMetrics CandidateFormation = MeasureFormationWithVirtualUnit(CandidateCoord);
 		const int32 AliveEnemyCount = GetAliveUnitCountForTeam(EHexUnitTeam::Enemy);
@@ -10248,26 +10384,201 @@ bool AHexGridActor::FindBestEnemyBotMove(AHexUnitActor* EnemyUnit, FIntPoint& Ou
 			continue;
 		}
 
-		if (Score > BestScore)
-		{
-			BestScore = Score;
-			BestTargetCoord = CandidateCoord;
-			BestPath = CandidatePath;
-		}
+		FScoredMoveCandidate& ScoredCandidate = ScoredCandidates.Emplace_GetRef();
+		ScoredCandidate.TargetCoord = CandidateCoord;
+		ScoredCandidate.Path = MoveTemp(CandidatePath);
+		ScoredCandidate.Score = Score;
+		ScoredCandidate.DecisionOption.Utility = Score / 1000.0f;
+		ScoredCandidate.DecisionOption.bSecuresKill = bCanKillAfterMove && bLeavesAttackAP;
+		ScoredCandidate.DecisionOption.bTerminalOutcome = ScoredCandidate.DecisionOption.bSecuresKill &&
+			GetAliveUnitCountForTeam(EHexUnitTeam::Player) <= 1;
+		ScoredCandidate.DecisionOption.StableKey = MakeEnemyBotStableCellKey(CandidateCoord);
 	}
 
-	if (BestPath.Num() <= 0)
+	if (ScoredCandidates.IsEmpty())
 	{
 		return false;
 	}
 
-	OutTargetCoord = BestTargetCoord;
-	OutPath = BestPath;
+	TArray<OtherBios::BotAI::FDecisionOption> DecisionOptions;
+	DecisionOptions.Reserve(ScoredCandidates.Num());
+	for (const FScoredMoveCandidate& Candidate : ScoredCandidates)
+	{
+		DecisionOptions.Add(Candidate.DecisionOption);
+	}
+
+	const size_t SelectedIndex = OtherBios::BotAI::FDecisionModel::SelectIndex(
+		DecisionOptions.GetData(),
+		static_cast<size_t>(DecisionOptions.Num()),
+		ToDecisionDifficulty(EnemyBotDifficulty),
+		FMath::FRand(),
+		FMath::Max(0.0f, EnemyBotDecisionTemperatureScale)
+	);
+	if (SelectedIndex >= static_cast<size_t>(ScoredCandidates.Num()))
+	{
+		return false;
+	}
+
+	const FScoredMoveCandidate& SelectedCandidate = ScoredCandidates[static_cast<int32>(SelectedIndex)];
+	OutTargetCoord = SelectedCandidate.TargetCoord;
+	OutPath = SelectedCandidate.Path;
 	if (OutScore)
 	{
-		*OutScore = BestScore;
+		*OutScore = SelectedCandidate.Score;
 	}
 	return true;
+}
+
+bool AHexGridActor::TryEnemyBotNeuralPlannerAction()
+{
+	using namespace OtherBios::BotNeural;
+
+	if (!bEnableEnemyBotNeuralPlanner || CurrentActionPoints <= 0 || Cells.IsEmpty())
+	{
+		return false;
+	}
+
+	FTopology Topology;
+	Topology.Cells.reserve(static_cast<size_t>(Cells.Num()));
+	for (const FHexCell& Cell : Cells)
+	{
+		Topology.Cells.push_back({ Cell.Q, Cell.R });
+	}
+	Topology.RebuildIndex();
+	if (Topology.Cells.empty())
+	{
+		return false;
+	}
+
+	TArray<AHexUnitActor*> SnapshotUnits;
+	SnapshotUnits.Reserve(UnitsByCoord.Num());
+	for (const TPair<FIntPoint, AHexUnitActor*>& Pair : UnitsByCoord)
+	{
+		AHexUnitActor* Unit = Pair.Value;
+		if (IsValid(Unit) && !Unit->GetIsDead() && Unit->CurrentHealth > 0)
+		{
+			SnapshotUnits.AddUnique(Unit);
+		}
+	}
+	SnapshotUnits.Sort([](const AHexUnitActor& Left, const AHexUnitActor& Right)
+	{
+		if (Left.Team != Right.Team) return static_cast<uint8>(Left.Team) < static_cast<uint8>(Right.Team);
+		const FIntPoint LeftCoord = Left.GetGridCoord();
+		const FIntPoint RightCoord = Right.GetGridCoord();
+		if (LeftCoord.X != RightCoord.X) return LeftCoord.X < RightCoord.X;
+		if (LeftCoord.Y != RightCoord.Y) return LeftCoord.Y < RightCoord.Y;
+		return Left.GetPathName() < Right.GetPathName();
+	});
+	if (SnapshotUnits.IsEmpty())
+	{
+		return false;
+	}
+
+	FState State;
+	State.Topology = &Topology;
+	State.SideToMove = 1; // Player=0, Enemy=1 inside the compact snapshot.
+	State.ActionPoints = FMath::Max(0, CurrentActionPoints);
+	State.MaxActionPoints = FMath::Max(0, MaxActionPoints);
+	State.MoveActionPointCost = FMath::Max(0, MoveActionPointCost);
+	State.AttackActionPointCost = CalculateAttackActionPointCost();
+	State.KillActionPointBonus = FMath::Max(0, KillActionPointBonus);
+	State.bUsePathLengthForMoveCost = bUsePathLengthForMoveCost;
+	State.bEnableKillActionPointBonus = bEnableKillActionPointBonus;
+	State.bLimitKillBonusOncePerTurn = bLimitKillActionPointBonusOncePerTurn;
+	State.KillBonusUsed[0] = bPlayerKillActionPointBonusGrantedThisTurn;
+	State.KillBonusUsed[1] = bEnemyKillActionPointBonusGrantedThisTurn;
+	State.Units.reserve(static_cast<size_t>(SnapshotUnits.Num()));
+
+	for (int32 Index = 0; Index < SnapshotUnits.Num(); ++Index)
+	{
+		AHexUnitActor* UnitActor = SnapshotUnits[Index];
+		const FIntPoint Coord = UnitActor->GetGridCoord();
+		FUnit Unit;
+		Unit.StableKey = static_cast<std::uint32_t>(Index + 1);
+		Unit.Team = UnitActor->Team == EHexUnitTeam::Enemy ? 1 : 0;
+		Unit.Cell = { Coord.X, Coord.Y };
+		Unit.Health = FMath::Max(0, UnitActor->CurrentHealth);
+		Unit.MaxHealth = FMath::Max(1, UnitActor->MaxHealth);
+		Unit.Damage = FMath::Max(0, UnitActor->AttackDamage);
+		Unit.AttackRange = FMath::Max(1, UnitActor->AttackRange);
+		Unit.MovementRange = FMath::Max(0, UnitActor->MovementRange);
+		Unit.MovementSpent = FMath::Max(0, MovementSpentByUnitThisTurn.FindRef(UnitActor));
+		Unit.HealAmount = FMath::Max(0, UnitActor->HealAmount);
+		Unit.HealRange = FMath::Max(1, UnitActor->AttackRange);
+		Unit.HealCost = CalculateHealActionPointCost(UnitActor);
+		Unit.IncomingDamageScale = UnitActor->IsMarkedForDeathActive()
+			? 1.0f + FMath::Clamp(UnitActor->ActiveMarkedForDeathDamageIncreasePercent, 0.0f, 5.0f)
+			: 1.0f;
+		Unit.LastStandSurviveHealth = FMath::Max(1, UnitActor->LastStandSurviveHealth);
+		Unit.bAlive = !UnitActor->GetIsDead() && UnitActor->CurrentHealth > 0;
+		Unit.bCanAct = UnitActor->CanAct();
+		Unit.bAttacked = HasUnitAttackedThisTurn(UnitActor);
+		Unit.bCanHeal = UnitActor->CanHeal();
+		Unit.bLastStandActive = UnitActor->bLastStandActive && UnitActor->RemainingLastStandTurns > 0;
+		State.Units.push_back(Unit);
+	}
+
+	FSearchSettings Settings;
+	Settings.Depth = FMath::Max(1, EnemyBotNeuralSearchDepth);
+	Settings.TopK = FMath::Max(1, EnemyBotNeuralTopK);
+	Settings.HeuristicSafetyCandidates = FMath::Max(0, EnemyBotNeuralSafetyCandidates);
+	Settings.NodeBudget = FMath::Max(1, EnemyBotNeuralNodeBudget);
+	Settings.TimeBudgetMilliseconds = FMath::Max(0.1f, EnemyBotNeuralTimeBudgetMilliseconds);
+	Settings.NeuralPolicyBlend = FMath::Clamp(EnemyBotNeuralPolicyBlend, 0.0f, 1.0f);
+	Settings.NeuralValueBlend = FMath::Clamp(EnemyBotNeuralValueBlend, 0.0f, 1.0f);
+	FNeuralSearchPlanner Planner;
+	const FSearchResult Result = Planner.FindBestAction(State, 1, Settings);
+	if (!Result.bHasAction)
+	{
+		return false;
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT(
+		"Enemy neural plan: Kind=%d Score=%.3f Nodes=%d Root=%d/%d Time=%.2fms BudgetHit=%s"),
+		static_cast<int32>(Result.Action.Kind), Result.Score, Result.NodesVisited,
+		Result.RootExpandedActions, Result.RootRawActions, Result.ElapsedMilliseconds,
+		Result.bBudgetExhausted ? TEXT("true") : TEXT("false"));
+
+	if (Result.Action.ActorIndex >= static_cast<size_t>(SnapshotUnits.Num()))
+	{
+		return false;
+	}
+	AHexUnitActor* Actor = SnapshotUnits[static_cast<int32>(Result.Action.ActorIndex)];
+	if (!IsValid(Actor) || Actor->Team != EHexUnitTeam::Enemy)
+	{
+		return false;
+	}
+
+	switch (Result.Action.Kind)
+	{
+	case EActionKind::Attack:
+		if (Result.Action.TargetIndex < static_cast<size_t>(SnapshotUnits.Num()))
+		{
+			return TryEnemyBotAttackTarget(Actor, SnapshotUnits[static_cast<int32>(Result.Action.TargetIndex)]);
+		}
+		break;
+	case EActionKind::Heal:
+		if (Result.Action.TargetIndex < static_cast<size_t>(SnapshotUnits.Num()))
+		{
+			return TryEnemyBotHealTarget(Actor, SnapshotUnits[static_cast<int32>(Result.Action.TargetIndex)]);
+		}
+		break;
+	case EActionKind::Move:
+	{
+		const FIntPoint Destination(Result.Action.Destination.Q, Result.Action.Destination.R);
+		const FIntPoint Start = Actor->GetGridCoord();
+		TArray<FHexCoord> Path;
+		if (Start != Destination && FindPath(Start.X, Start.Y, Destination.X, Destination.Y, Path) && !Path.IsEmpty())
+		{
+			return ExecuteEnemyBotMove(Actor, Destination, Path);
+		}
+		break;
+	}
+	case EActionKind::EndTurn:
+	default:
+		break;
+	}
+	return false;
 }
 
 bool AHexGridActor::TryEnemyBotAttack(AHexUnitActor* EnemyUnit)
@@ -10289,6 +10600,21 @@ bool AHexGridActor::TryEnemyBotAttack(AHexUnitActor* EnemyUnit)
 
 	AHexUnitActor* Target = FindBestEnemyBotAttackTarget(EnemyUnit);
 	if (!IsValid(Target))
+	{
+		return false;
+	}
+	return TryEnemyBotAttackTarget(EnemyUnit, Target);
+}
+
+bool AHexGridActor::TryEnemyBotAttackTarget(AHexUnitActor* EnemyUnit, AHexUnitActor* Target)
+{
+	if (!IsValid(EnemyUnit) || EnemyUnit->GetIsDead() || EnemyUnit->Team != EHexUnitTeam::Enemy ||
+		!IsValid(Target) || Target->GetIsDead() || Target->Team != EHexUnitTeam::Player)
+	{
+		return false;
+	}
+	if (!EnemyUnit->CanAct() || !CanUnitAttackThisTurn(EnemyUnit) ||
+		!HasEnoughActionPoints(CalculateAttackActionPointCost()))
 	{
 		return false;
 	}
@@ -10336,6 +10662,21 @@ bool AHexGridActor::TryEnemyBotHeal(AHexUnitActor* Healer)
 
 	AHexUnitActor* Target = FindBestEnemyBotHealTarget(Healer);
 	if (!IsValid(Target))
+	{
+		return false;
+	}
+	return TryEnemyBotHealTarget(Healer, Target);
+}
+
+bool AHexGridActor::TryEnemyBotHealTarget(AHexUnitActor* Healer, AHexUnitActor* Target)
+{
+	if (!IsValid(Healer) || Healer->GetIsDead() || Healer->Team != EHexUnitTeam::Enemy ||
+		!IsValid(Target) || Target->GetIsDead() || Target->Team != EHexUnitTeam::Enemy)
+	{
+		return false;
+	}
+	if (!Healer->CanAct() || !Healer->CanHeal() || !Healer->CanHealTarget(Target) ||
+		!HasEnoughActionPoints(CalculateHealActionPointCost(Healer)))
 	{
 		return false;
 	}
@@ -10489,7 +10830,7 @@ bool AHexGridActor::TrySpendEnemyBotMove(AHexUnitActor* EnemyUnit)
 
 	// Hard rule: if this unit can finish a target, spend the attack before doing fancy setup.
 	// This stops the bot from wasting a champion ability or a random move while a kill is available.
-	if (bCanKillTarget && !ShouldEnemyBotMakeDifficultyMistake(EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 0.75f : 0.05f))
+	if (bCanKillTarget)
 	{
 		return TryEnemyBotAttack(EnemyUnit);
 	}
@@ -10517,7 +10858,7 @@ bool AHexGridActor::TrySpendEnemyBotMove(AHexUnitActor* EnemyUnit)
 		}
 
 		const bool bHealIsClearlyUseful = CurrentHealScore >= AttackScore + 120.0f || !bCanAttackNow;
-		if (!ShouldEnemyBotMakeDifficultyMistake(EnemyBotDifficulty == EHexBotDifficulty::WarmUp ? 1.0f : 0.15f) && bHealIsClearlyUseful)
+		if (bHealIsClearlyUseful)
 		{
 			return TryEnemyBotHeal(EnemyUnit);
 		}
